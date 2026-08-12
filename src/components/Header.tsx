@@ -6,7 +6,8 @@ import {
   AlertTriangle,
   Plus,
   History,
-  ArrowLeft
+  ArrowLeft,
+  Lock
 } from 'lucide-react';
 import { Section } from '../types';
 
@@ -22,6 +23,7 @@ interface HeaderProps {
   onOpenHistory: () => void;
   onOpenAdmin: () => void;
   onOpenConflictResolver: () => void;
+  onOpenLockModal: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -34,6 +36,7 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenHistory,
   onOpenAdmin,
   onOpenConflictResolver,
+  onOpenLockModal,
 }) => {
   const isBoys = currentSection === 'boys';
   const brandBg = isBoys ? 'bg-emerald-600' : 'bg-pink-600';
@@ -135,17 +138,28 @@ export const Header: React.FC<HeaderProps> = ({
             <span>History</span>
           </button>
 
-          {/* Admin */}
+          {/* Lock / Block Period */}
+          <button
+            onClick={onOpenLockModal}
+            className="flex items-center gap-1.5 bg-rose-50 hover:bg-rose-100 text-rose-900 border border-rose-300 px-3 py-2 rounded-lg text-xs font-bold transition cursor-pointer shadow-2xs"
+            title="Lock or Block Periods with Technician Notes"
+          >
+            <Lock className="w-3.5 h-3.5 text-rose-600 shrink-0" />
+            <span className="hidden sm:inline">Lock / Block Period</span>
+          </button>
+
+          {/* Admin & Statistics */}
           <button
             onClick={onOpenAdmin}
-            className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium transition border ${
+            className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold transition border cursor-pointer ${
               isAdminLoggedIn 
-                ? 'bg-slate-900 text-white border-slate-900' 
-                : 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-300'
+                ? 'bg-indigo-900 text-white border-indigo-900 shadow-2xs' 
+                : 'bg-indigo-50 hover:bg-indigo-100 text-indigo-900 border-indigo-200'
             }`}
+            title="Open Admin Dashboard & Teacher Experiment Statistics"
           >
-            <ShieldCheck className="w-3.5 h-3.5 text-indigo-500" />
-            <span className="hidden sm:inline">{isAdminLoggedIn ? 'Admin Active' : 'Admin'}</span>
+            <ShieldCheck className="w-4 h-4 text-indigo-500 shrink-0" />
+            <span className="hidden sm:inline">{isAdminLoggedIn ? 'Admin Active' : 'Admin & Statistics'}</span>
           </button>
 
         </div>

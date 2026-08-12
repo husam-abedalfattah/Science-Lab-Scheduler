@@ -37,8 +37,18 @@ export const INITIAL_APP_STATE: AppState = {
           slotIndex: 0,
           teacher: 'Dr. Ahmed Al-Harbi',
           className: '4A',
-          subject: 'Chemistry Experiments',
-          createdAt: new Date().toISOString()
+          subject: 'Acid-Base Titration',
+          createdAt: new Date().toISOString(),
+          experimentDetails: {
+            experimentName: 'Acid-Base Neutralization & Titration',
+            materialsNeeded: '1. Hydrochloric Acid Solution (HCl 0.1M, 500mL)\n2. Sodium Hydroxide (NaOH 0.1M, 500mL)\n3. Phenolphthalein indicator bottle (50mL)\n4. Burettes (x10) & Retort Stands (x10)\n5. Erlenmeyer Flasks 250mL (x20)\n6. Volumetric Pipettes 25mL (x10)',
+            numberOfGroups: 5,
+            needsTechSupport: true,
+            safetyItems: ['Safety Goggles', 'Lab Coat', 'Nitrile Gloves'],
+            techNotes: 'Prepare fresh 0.1M NaOH solution on Sunday morning before Period 1.',
+            needsPrintedWorksheets: true,
+            worksheetCopies: 25
+          }
         },
         {
           id: 'res-2',
@@ -48,8 +58,17 @@ export const INITIAL_APP_STATE: AppState = {
           slotIndex: 1,
           teacher: 'Husam Abed Alfattah',
           className: '4B',
-          subject: 'Acid-Base Titration',
-          createdAt: new Date().toISOString()
+          subject: 'Chemical Reaction Rates',
+          createdAt: new Date().toISOString(),
+          experimentDetails: {
+            experimentName: 'Factors Affecting Reaction Rates',
+            materialsNeeded: '1. Sodium Thiosulfate 0.1M (1L)\n2. Hydrochloric Acid 2M (500mL)\n3. Stopwatches (x8)\n4. Conical Flasks 100mL with marked X paper (x8)\n5. Thermometers (x8)',
+            numberOfGroups: 4,
+            needsTechSupport: false,
+            safetyItems: ['Safety Goggles', 'Lab Coat'],
+            needsPrintedWorksheets: true,
+            worksheetCopies: 22
+          }
         }
       ],
       'sunday_p2_lab-2': [
@@ -62,7 +81,17 @@ export const INITIAL_APP_STATE: AppState = {
           teacher: 'Fahad Al-Otaibi',
           className: '5A',
           subject: 'Microscope Cell Analysis',
-          createdAt: new Date().toISOString()
+          createdAt: new Date().toISOString(),
+          experimentDetails: {
+            experimentName: 'Onion Epidermis & Cheek Cell Microscopy',
+            materialsNeeded: '1. Compound Light Microscopes (x12)\n2. Glass Microscope Slides & Coverslips (x50)\n3. Methylene Blue Stain & Iodine Solution\n4. Dissecting Needles & Forceps\n5. Fresh Onion Bulbs & Cotton Swabs',
+            numberOfGroups: 6,
+            needsTechSupport: true,
+            safetyItems: ['Safety Goggles', 'Nitrile Gloves'],
+            techNotes: 'Check microscope halogen bulbs and glass slide covers beforehand.',
+            needsPrintedWorksheets: true,
+            worksheetCopies: 28
+          }
         }
       ],
       'monday_p3_lab-3': [
@@ -74,8 +103,17 @@ export const INITIAL_APP_STATE: AppState = {
           slotIndex: 0,
           teacher: 'Khalid Al-Ghamdi',
           className: '6A',
-          subject: 'Optics & Lenses',
-          createdAt: new Date().toISOString()
+          subject: 'Optics & Refraction',
+          createdAt: new Date().toISOString(),
+          experimentDetails: {
+            experimentName: 'Refraction of Light & Prism Dispersion',
+            materialsNeeded: '1. Glass Prisms & Glass Rectangular Blocks (x10)\n2. Ray Boxes with Single/Triple Slits (x10)\n3. Power Supplies 12V (x10)\n4. Protractors & White Drawing Sheets (x30)\n5. Convex & Concave Lenses (f=10cm, 15cm)',
+            numberOfGroups: 5,
+            needsTechSupport: false,
+            safetyItems: ['Safety Glasses'],
+            needsPrintedWorksheets: true,
+            worksheetCopies: 26
+          }
         },
         {
           id: 'res-5',
@@ -86,7 +124,17 @@ export const INITIAL_APP_STATE: AppState = {
           teacher: 'Sultan Al-Mansoor',
           className: '6B',
           subject: 'Circuits & Electricity',
-          createdAt: new Date().toISOString()
+          createdAt: new Date().toISOString(),
+          experimentDetails: {
+            experimentName: 'Ohm\'s Law & Series/Parallel Circuits',
+            materialsNeeded: '1. DC Variable Power Supplies 0-12V (x8)\n2. Digital Multimeters (Ammeters & Voltmeters) (x16)\n3. Resistors (10Ω, 47Ω, 100Ω) (x24)\n4. Connecting Leads with Crocodile Clips (x50)\n5. Circuit Switches & Rheostats (x8)',
+            numberOfGroups: 4,
+            needsTechSupport: true,
+            safetyItems: ['Safety Glasses'],
+            techNotes: 'Verify multimeter fuses before lesson.',
+            needsPrintedWorksheets: true,
+            worksheetCopies: 24
+          }
         }
       ],
       'tuesday_p2_lab-4': [
@@ -99,7 +147,16 @@ export const INITIAL_APP_STATE: AppState = {
           teacher: 'Tariq Al-Zahrani',
           className: '5B',
           subject: 'Density & Measurement',
-          createdAt: new Date().toISOString()
+          createdAt: new Date().toISOString(),
+          experimentDetails: {
+            experimentName: 'Measuring Density of Irregular Solids',
+            materialsNeeded: '1. Electronic Digital Balances (±0.01g) (x6)\n2. Graduated Cylinders 100mL & 250mL (x12)\n3. Irregular Metal Samples (Copper, Aluminum, Lead) (x18)\n4. Water Beakers 500mL (x12)\n5. Vernier Calipers & Micrometers (x6)',
+            numberOfGroups: 6,
+            needsTechSupport: false,
+            safetyItems: ['Safety Glasses'],
+            needsPrintedWorksheets: true,
+            worksheetCopies: 25
+          }
         }
       ]
     },
@@ -134,7 +191,16 @@ export const INITIAL_APP_STATE: AppState = {
           teacher: 'Noura Al-Shammari',
           className: '4G1',
           subject: 'Plant Biology Observation',
-          createdAt: new Date().toISOString()
+          createdAt: new Date().toISOString(),
+          experimentDetails: {
+            experimentName: 'Stomata Count & Plant Transpiration',
+            materialsNeeded: '1. Fresh Plant Leaves (Spinach & Hibiscus)\n2. Clear Nail Polish & Transparent Tape\n3. Compound Microscopes (x10)\n4. Microscope Slides & Coverslips (x30)\n5. Forceps & Scissors',
+            numberOfGroups: 5,
+            needsTechSupport: true,
+            safetyItems: ['Safety Goggles', 'Lab Coat'],
+            needsPrintedWorksheets: true,
+            worksheetCopies: 24
+          }
         },
         {
           id: 'res-g2',
@@ -144,8 +210,17 @@ export const INITIAL_APP_STATE: AppState = {
           slotIndex: 1,
           teacher: 'Sara Al-Mutairi',
           className: '4G2',
-          subject: 'Photosynthesis Lab',
-          createdAt: new Date().toISOString()
+          subject: 'Photosynthesis Rate',
+          createdAt: new Date().toISOString(),
+          experimentDetails: {
+            experimentName: 'Measuring Photosynthesis in Elodea Pondweed',
+            materialsNeeded: '1. Fresh Elodea/Cabomba Pondweed sprigs (x10)\n2. Sodium Bicarbonate Solution 1% (1L)\n3. Boiling Tubes & Test Tube Racks (x10)\n4. Desk Lamps with 60W bulbs (x10)\n5. Meter Rulers & Timers (x10)',
+            numberOfGroups: 5,
+            needsTechSupport: false,
+            safetyItems: ['Safety Goggles'],
+            needsPrintedWorksheets: true,
+            worksheetCopies: 22
+          }
         }
       ],
       'wednesday_p4_lab-5': [
@@ -158,7 +233,17 @@ export const INITIAL_APP_STATE: AppState = {
           teacher: 'Fatima Al-Zahrani',
           className: '6G1',
           subject: 'States of Matter',
-          createdAt: new Date().toISOString()
+          createdAt: new Date().toISOString(),
+          experimentDetails: {
+            experimentName: 'Phase Changes & Heating Curve of Water',
+            materialsNeeded: '1. Ice Cubes (1kg in Ice Chest)\n2. Electric Heating Plates 500W (x6)\n3. Beakers 250mL (x6)\n4. Digital Temperature Probes / Thermometers (x6)\n5. Stopwatch Timers (x6)',
+            numberOfGroups: 6,
+            needsTechSupport: true,
+            safetyItems: ['Heat Resistant Gloves', 'Safety Goggles'],
+            techNotes: 'Fill ice chest at 10:00 AM before Period 4.',
+            needsPrintedWorksheets: true,
+            worksheetCopies: 27
+          }
         }
       ]
     },

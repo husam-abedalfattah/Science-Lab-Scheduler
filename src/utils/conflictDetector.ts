@@ -174,9 +174,9 @@ export function validateNewBooking(
   const periodReservations = allSectionReservations.filter(r => r.day === day && r.period === period);
   const existingSlotRes = periodReservations.find(r => r.slotIndex === slotIndex);
 
-  // 1. Technician Capacity Limit (Max 2 active labs per period across all 5 labs)
-  if (!existingSlotRes && periodReservations.length >= 2) {
-    errors.push(`Technician Limit: Only 1 lab technician is on duty. Max 2 labs can be active in Period ${period} on ${day.toUpperCase()}.`);
+  // 1. Technician Capacity Limit (Max 3 active labs per period across all 5 labs)
+  if (!existingSlotRes && periodReservations.length >= 3) {
+    errors.push(`Technician Capacity Limit: Max 3 labs can be reserved concurrently in Period ${period} on ${day.toUpperCase()}.`);
   }
 
   // 1b. Technician Daily Max Load (Max 5 periods per day)

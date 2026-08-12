@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { AppState, Day, Section, Reservation, ConflictAlert } from './types';
+import { AppState, Day, Section, Reservation, ConflictAlert, ExperimentDetails, BlockedPeriod } from './types';
 import { INITIAL_APP_STATE, DEFAULT_LABS } from './data/initialData';
 import { detectAllConflicts } from './utils/conflictDetector';
 import {
@@ -18,6 +18,7 @@ import { BookingModal } from './components/BookingModal';
 import { ConflictResolverModal } from './components/ConflictResolverModal';
 import { AdminModal } from './components/AdminModal';
 import { HistoryModal } from './components/HistoryModal';
+import { LockPeriodModal } from './components/LockPeriodModal';
 import { SectionSelector } from './components/SectionSelector';
 import { NotificationToast, ToastMessage } from './components/NotificationToast';
 
@@ -64,6 +65,8 @@ export default function App() {
   const [isConflictModalOpen, setIsConflictModalOpen] = useState<boolean>(false);
   const [isAdminModalOpen, setIsAdminModalOpen] = useState<boolean>(false);
   const [isHistoryModalOpen, setIsHistoryModalOpen] = useState<boolean>(false);
+  const [isLockModalOpen, setIsLockModalOpen] = useState<boolean>(false);
+  const [lockSlotTarget, setLockSlotTarget] = useState<{ day: Day; period: number } | null>(null);
 
   // Toast Notification
   const [toast, setToast] = useState<ToastMessage | null>(null);
@@ -128,6 +131,7 @@ export default function App() {
     className: string;
     subject?: string;
     isOverride?: boolean;
+    experimentDetails?: ExperimentDetails;
   }) => {
     if (!currentSection) return;
 
@@ -141,7 +145,8 @@ export default function App() {
       className: bookingData.className,
       subject: bookingData.subject,
       createdAt: new Date().toISOString(),
-      isOverride: bookingData.isOverride
+      isOverride: bookingData.isOverride,
+      experimentDetails: bookingData.experimentDetails
     };
 
     try {
@@ -289,6 +294,31 @@ export default function App() {
     showToast('Reset to default demo dataset.', 'info');
   };
 
+  const handleSaveLockPeriod = async (day: Day, period: number, lockObj: BlockedPeriod | null) => {
+    if (!currentSection || !currentSectionData) return;
+    const currentBlocks = { ...(currentSectionData.blockedPeriods || {}) };
+    const key = `${day}_p${period}`;
+
+    if (lockObj) {
+      currentBlocks[key] = lockObj;
+    } else {
+      delete currentBlocks[key];
+    }
+
+    try {
+      await updateSectionSettings(currentSection, { blockedPeriods: currentBlocks });
+      showToast(
+        lockObj 
+          ? `Period locked for ${day.toUpperCase()} Period ${period}.`
+          : `Unlocked ${day.toUpperCase()} Period ${period}.`, 
+        'success'
+      );
+    } catch (err) {
+      console.error('Save lock period error:', err);
+      showToast('Failed to update period lock.', 'error');
+    }
+  };
+
   // If no section chosen, display SectionSelector
   if (!currentSection || !currentSectionData) {
     return (
@@ -341,6 +371,10 @@ export default function App() {
         onOpenHistory={() => setIsHistoryModalOpen(true)}
         onOpenAdmin={() => setIsAdminModalOpen(true)}
         onOpenConflictResolver={() => setIsConflictModalOpen(true)}
+        onOpenLockModal={() => {
+          setLockSlotTarget(null);
+          setIsLockModalOpen(true);
+        }}
       />
 
       {/* Main Content View */}
@@ -370,8 +404,17 @@ export default function App() {
           conflicts={activeConflicts}
           searchQuery={searchQuery}
           selectedLabFilter={selectedLabFilter}
+          blockedPeriods={currentSectionData.blockedPeriods || {}}
           onQuickBook={handleOpenQuickBook}
           onCancelReservation={handleCancelReservation}
+          onOpenLockModal={(day, period) => {
+            if (day && period) {
+              setLockSlotTarget({ day, period });
+            } else {
+              setLockSlotTarget(null);
+            }
+            setIsLockModalOpen(true);
+          }}
         />
 
       </main>
@@ -425,6 +468,15 @@ export default function App() {
         isOpen={isHistoryModalOpen}
         sectionData={currentSectionData}
         onClose={() => setIsHistoryModalOpen(false)}
+      />
+
+      <LockPeriodModal
+        isOpen={isLockModalOpen}
+        sectionData={currentSectionData}
+        initialDay={lockSlotTarget?.day || 'sunday'}
+        initialPeriod={lockSlotTarget?.period || 1}
+        onClose={() => setIsLockModalOpen(false)}
+        onSaveLock={handleSaveLockPeriod}
       />
 
     </div>
