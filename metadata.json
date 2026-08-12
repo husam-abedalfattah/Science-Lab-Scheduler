@@ -1,0 +1,6 @@
+{
+  "name": "Science Lab Reservation Scheduler",
+  "description": "Weekly science lab booking system supporting 5 labs, 2 reservations per period, smart conflict detection, double-booking prevention, and section management.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

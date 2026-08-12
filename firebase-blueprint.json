@@ -1,0 +1,38 @@
+{
+  "entities": {
+    "sections": {
+      "title": "Section Settings",
+      "description": "Stores settings for boys and girls sections",
+      "type": "object",
+      "properties": {
+        "sectionId": { "type": "string" },
+        "isLocked": { "type": "boolean" },
+        "deadlineDay": { "type": "number" },
+        "deadlineTime": { "type": "string" },
+        "weekNumber": { "type": "number" },
+        "teachers": { "type": "array", "items": { "type": "string" } },
+        "classes": { "type": "array", "items": { "type": "string" } }
+      },
+      "required": ["sectionId"]
+    },
+    "reservations": {
+      "title": "Lab Reservations",
+      "description": "Reservations for lab slots across all days and periods",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "section": { "type": "string" },
+        "day": { "type": "string" },
+        "period": { "type": "number" },
+        "labId": { "type": "string" },
+        "slotIndex": { "type": "number" },
+        "teacher": { "type": "string" },
+        "className": { "type": "string" },
+        "subject": { "type": "string" },
+        "topic": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["section", "day", "period", "labId", "slotIndex", "teacher", "className"]
+    }
+  }
+}
