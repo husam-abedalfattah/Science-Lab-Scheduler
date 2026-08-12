@@ -224,27 +224,27 @@ export const ScheduleGrid: React.FC<ScheduleGridProps> = ({
       )}
 
       {/* MASTER TIMETABLE MATRIX */}
-      <div className={`bg-white rounded-2xl border ${primaryBorder} shadow-sm overflow-hidden`}>
-        <div className="overflow-x-auto">
-          <table className="w-full text-left border-collapse min-w-[950px]">
+      <div className={`bg-white rounded-2xl border ${primaryBorder} shadow-sm overflow-hidden print:border-none print:shadow-none print:rounded-none`}>
+        <div className="overflow-x-auto print:overflow-visible">
+          <table className="master-schedule-table w-full text-left border-collapse min-w-[950px] print:min-w-0 print:w-full print:table-fixed">
             
             {/* Table Header Row: Days */}
             <thead>
               <tr className={`${isBoys ? 'bg-emerald-100/70 text-emerald-950' : 'bg-pink-100/70 text-pink-950'} text-xs font-bold border-b ${primaryBorder}`}>
-                <th className="py-3.5 px-4 w-28 border-r border-slate-200 text-center font-extrabold uppercase tracking-wider text-slate-700 bg-slate-100/80">
+                <th className="py-3.5 px-4 w-28 border-r border-slate-200 text-center font-extrabold uppercase tracking-wider text-slate-700 bg-slate-100/80 print:w-12 print:p-1 print:text-[10px]">
                   Period
                 </th>
                 {activeDays.map(dayObj => {
                   const activePeriods = getDayActivePeriods(dayObj.id);
                   const isMax = activePeriods >= 5;
                   return (
-                    <th key={dayObj.id} className="py-3 px-3 border-r border-slate-200 text-center font-bold text-sm min-w-[200px]">
+                    <th key={dayObj.id} className="py-3 px-3 border-r border-slate-200 text-center font-bold text-sm min-w-[200px] print:min-w-0 print:p-1 print:text-xs">
                       <div className="flex flex-col items-center justify-center gap-1">
                         <div className="flex items-center gap-1.5">
-                          <Calendar className="w-3.5 h-3.5 opacity-70" />
+                          <Calendar className="w-3.5 h-3.5 opacity-70 print:hidden" />
                           <span>{dayObj.label}</span>
                         </div>
-                        <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${
+                        <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border print:hidden ${
                           isMax 
                             ? 'bg-rose-100 text-rose-800 border-rose-300' 
                             : 'bg-white/80 text-slate-700 border-slate-200'

@@ -249,7 +249,8 @@ export const PdfReportModal: React.FC<PdfReportModalProps> = ({
       });
 
       const imgData = canvas.toDataURL('image/jpeg', 0.95);
-      const pdf = new jsPDF('p', 'mm', 'a4');
+      const isLandscape = selectedDayFilter === 'ALL' && !activeSingleRes;
+      const pdf = new jsPDF(isLandscape ? 'l' : 'p', 'mm', 'a4');
       const pdfWidth = pdf.internal.pageSize.getWidth();
       const pdfHeight = pdf.internal.pageSize.getHeight();
       
