@@ -164,11 +164,25 @@ export const ScheduleGrid: React.FC<ScheduleGridProps> = ({
             </button>
           )}
 
+          {/* Quick Print Schedule Button */}
+          <button
+            type="button"
+            onClick={() => {
+              window.focus();
+              window.print();
+            }}
+            className="px-3.5 py-2 bg-slate-800 hover:bg-slate-900 text-white font-bold text-xs rounded-xl flex items-center gap-1.5 transition shadow-xs cursor-pointer print:hidden"
+            title="Print Timetable Grid"
+          >
+            <Printer className="w-4 h-4 text-slate-200" />
+            <span>Print Grid</span>
+          </button>
+
           {/* PDF Report Export Button */}
           <button
             type="button"
             onClick={handleOpenPdfForDayOrMaster}
-            className="px-3.5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl flex items-center gap-1.5 transition shadow-xs cursor-pointer"
+            className="px-3.5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl flex items-center gap-1.5 transition shadow-xs cursor-pointer print:hidden"
           >
             <FileText className="w-4 h-4" />
             <span>

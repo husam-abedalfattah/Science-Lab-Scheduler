@@ -286,12 +286,26 @@ export const PdfReportModal: React.FC<PdfReportModalProps> = ({
 
   // Handle Direct Browser Print
   const handlePrint = () => {
-    window.print();
+    try {
+      window.focus();
+      document.body.classList.add('pdf-modal-printing');
+      
+      // Delay slightly to let class apply before browser print dialog captures DOM
+      setTimeout(() => {
+        window.print();
+        setTimeout(() => {
+          document.body.classList.remove('pdf-modal-printing');
+        }, 1000);
+      }, 50);
+    } catch (err) {
+      console.error('Print failed:', err);
+      document.body.classList.remove('pdf-modal-printing');
+    }
   };
 
   return (
-    <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs z-50 flex items-center justify-center p-4 print:p-0 print:static print:bg-white print:z-auto">
-      <div className="bg-white border-2 border-slate-300 rounded-2xl shadow-2xl max-w-4xl w-full p-6 max-h-[92vh] overflow-y-auto font-sans print:max-h-none print:shadow-none print:border-none print:w-full print:max-w-none print:p-0">
+    <div className="pdf-report-modal-backdrop fixed inset-0 bg-slate-900/60 backdrop-blur-xs z-50 flex items-center justify-center p-4 print:p-0 print:static print:bg-white print:z-auto">
+      <div className="pdf-report-modal-content bg-white border-2 border-slate-300 rounded-2xl shadow-2xl max-w-4xl w-full p-6 max-h-[92vh] overflow-y-auto font-sans print:max-h-none print:shadow-none print:border-none print:w-full print:max-w-none print:p-0">
         
         {/* Modal Actions Header (Hidden during Print) */}
         <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-5 pb-4 border-b border-slate-200 print:hidden">
