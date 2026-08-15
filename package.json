@@ -1,38 +1,39 @@
 {
-  "name": "react-example",
+  "name": "science-lab-reservation-scheduler",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "scripts": {
     "dev": "vite --port=3000 --host=0.0.0.0",
     "build": "vite build",
     "preview": "vite preview",
-    "clean": "rm -rf dist server.js",
-    "lint": "tsc --noEmit"
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit",
+    "verify:data": "esbuild scripts/verifySeedData.ts --bundle --platform=node --format=cjs --outfile=node_modules/.cache/verify-seed-data.cjs --log-level=error && node node_modules/.cache/verify-seed-data.cjs",
+    "check": "npm run typecheck && npm run verify:data && npm run verify:import && npm run verify:template",
+    "verify:import": "esbuild scripts/verifyMaterialImport.ts --bundle --platform=node --format=cjs --outfile=node_modules/.cache/verify-material-import.cjs --log-level=error && node node_modules/.cache/verify-material-import.cjs",
+    "verify:template": "esbuild scripts/verifyMaterialTemplate.ts --bundle --platform=node --format=cjs --outfile=node_modules/.cache/verify-material-template.cjs --log-level=error --external:exceljs && node node_modules/.cache/verify-material-template.cjs"
   },
   "dependencies": {
-    "@google/genai": "^2.4.0",
     "@tailwindcss/vite": "^4.1.14",
     "@vitejs/plugin-react": "^5.0.4",
-    "dotenv": "^17.2.3",
-    "express": "^4.21.2",
+    "exceljs": "^4.4.0",
     "firebase": "^12.17.1",
     "html2canvas": "^1.4.1",
     "jspdf": "^4.2.1",
     "lucide-react": "^0.546.0",
-    "motion": "^12.23.24",
     "react": "^19.0.1",
     "react-dom": "^19.0.1",
+    "read-excel-file": "^9.3.10",
     "vite": "^6.2.3"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",
-    "autoprefixer": "^10.4.21",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
     "esbuild": "^0.25.0",
     "tailwindcss": "^4.1.14",
-    "tsx": "^4.21.0",
-    "typescript": "~5.8.2",
-    "vite": "^6.2.3",
-    "@types/express": "^4.17.21"
+    "typescript": "~5.8.2"
   }
 }

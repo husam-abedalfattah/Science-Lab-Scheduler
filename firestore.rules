@@ -1,11 +1,206 @@
 rules_version = '2';
+
+// ---------------------------------------------------------------------------
+// DEPLOYMENT NOTE
+//
+// These rules require a signed-in user. The app signs in anonymously on boot
+// (see src/firebase.ts), so before deploying these rules you MUST enable
+// Anonymous authentication:
+//
+//   Firebase console -> Authentication -> Sign-in method -> Anonymous -> Enable
+//
+// Deploy with:  firebase deploy --only firestore:rules
+//
+// Anonymous auth stops drive-by writes from anyone who reads the public API
+// key out of the bundle, and gives every write an auditable uid. It does NOT
+// distinguish a teacher from an administrator. To gate destructive operations
+// properly, switch to Google sign-in restricted to the school domain and add
+// an `admins/{uid}` document, then tighten `isAdmin()` below.
+// ---------------------------------------------------------------------------
+
 service cloud.firestore {
   match /databases/{database}/documents {
-    match /sections/{sectionId} {
-      allow read, write: if true;
+
+    function isSignedIn() {
+      return request.auth != null;
     }
+
+    // Placeholder for real admin checks. Create an `admins/{uid}` doc per
+    // administrator and this starts returning true for them only.
+    function isAdmin() {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+
+    function isValidSection(sectionId) {
+      return sectionId in ['boys', 'girls'];
+    }
+
+    // Reject oversized inline attachments early. Firestore hard-caps a
+    // document at 1 MiB; keeping the data URI under ~800 KB leaves room for
+    // the rest of the reservation fields.
+    function attachmentWithinLimit(data) {
+      return !('experimentDetails' in data)
+        || !('fileUrl' in data.experimentDetails)
+        || data.experimentDetails.fileUrl is string
+        && data.experimentDetails.fileUrl.size() < 800000;
+    }
+
+    // The lab supervisor's response to a booking. Shape must match
+    // SupervisorReview in src/types.ts.
+    //
+    // A decline is required to carry a reason: a refusal with no explanation
+    // leaves the teacher unable to act on it, and the whole point of the field
+    // is to close that loop. `reviewedAt` is a client clock and is treated as
+    // display metadata, not as anything security-relevant.
+    function validSupervisorReview(data) {
+      return !('supervisorReview' in data)
+        || (
+             data.supervisorReview is map
+             && data.supervisorReview.keys().hasAll(['status', 'reviewedAt'])
+             && data.supervisorReview.status in ['acknowledged', 'declined']
+             && data.supervisorReview.reviewedAt is string
+             && data.supervisorReview.reviewedAt.size() <= 40
+             && (
+                  !('reason' in data.supervisorReview)
+                  || (data.supervisorReview.reason is string
+                      && data.supervisorReview.reason.size() <= 300)
+                )
+             && (
+                  data.supervisorReview.status != 'declined'
+                  || ('reason' in data.supervisorReview
+                      && data.supervisorReview.reason.size() > 0)
+                )
+           );
+    }
+
+    // The document id IS the slot lock. src/services/firebaseService.ts derives
+    // it as `${section}__${day}_p${period}_slot${slotIndex}` so two teachers
+    // racing for one slot collide on the same document and the transaction
+    // resolves the winner. That invariant only holds if the body agrees with
+    // the id -- otherwise a client could park a monday/period-5 booking inside
+    // the sunday/period-1 document and occupy two slots with one reservation.
+    function idMatchesSlot(reservationId, data) {
+      return reservationId == data.section + '__' + data.day
+             + '_p' + string(data.period)
+             + '_slot' + string(data.slotIndex);
+    }
+
+    function isValidReservation(reservationId, data) {
+      return data.keys().hasAll(
+               ['section', 'day', 'period', 'labId', 'slotIndex', 'teacher', 'className']
+             )
+        && isValidSection(data.section)
+        && data.day in ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday']
+        && data.period is int && data.period >= 1 && data.period <= 7
+        && data.slotIndex is int && data.slotIndex >= 0 && data.slotIndex <= 2
+        && data.labId is string && data.labId.size() > 0 && data.labId.size() <= 100
+        && data.teacher is string && data.teacher.size() > 0 && data.teacher.size() <= 200
+        && data.className is string && data.className.size() > 0 && data.className.size() <= 50
+        && (!('subject' in data) || (data.subject is string && data.subject.size() <= 200))
+        && (!('id' in data) || data.id == reservationId)
+        && idMatchesSlot(reservationId, data)
+        && attachmentWithinLimit(data)
+        && validSupervisorReview(data);
+    }
+
+    // Section documents carry the rosters, capacity settings and the archive
+    // for everyone, so a malformed write here breaks the app for all users.
+    // Every field is optional because the client writes partial updates with
+    // `merge: true`; what is present must still be the right shape.
+    function isValidSectionDoc(data) {
+      return (!('weekNumber' in data) || (data.weekNumber is int && data.weekNumber >= 1))
+        && (!('deadlineDay' in data) || (data.deadlineDay is int
+             && data.deadlineDay >= 0 && data.deadlineDay <= 6))
+        // "HH:MM", or "HH:MM:SS" from a time input with a sub-minute step.
+        && (!('deadlineTime' in data) || (data.deadlineTime is string
+             && data.deadlineTime.size() <= 8))
+        && (!('isLocked' in data) || data.isLocked is bool)
+        && (!('name' in data) || (data.name is string && data.name.size() <= 100))
+        && (!('themeColor' in data) || (data.themeColor is string && data.themeColor.size() <= 30))
+        && (!('teachers' in data) || (data.teachers is list && data.teachers.size() <= 200))
+        && (!('classes' in data) || (data.classes is list && data.classes.size() <= 200))
+        && (!('labs' in data) || (data.labs is list && data.labs.size() <= 50))
+        // A hard ceiling, not the app's target: the client trims to
+        // MAX_ARCHIVED_WEEKS (12) in src/constants.ts. Deliberately looser so
+        // raising that constant does not start rejecting every archive write,
+        // while still bounding growth -- the section document caps at 1 MiB and
+        // unbounded history is what fills it.
+        && (!('history' in data) || (data.history is list && data.history.size() <= 24))
+        && (!('blockedPeriods' in data) || data.blockedPeriods is map);
+    }
+
+    match /admins/{uid} {
+      // Managed from the Firebase console only; never writable from the client.
+      allow read: if isSignedIn();
+      allow write: if false;
+    }
+
+    match /sections/{sectionId} {
+      allow read: if isSignedIn();
+
+      // Section settings drive booking limits, locks and the teacher/class
+      // rosters for everyone, so writes stay narrow: signed in, known section,
+      // well-formed. Tighten to `isAdmin()` once an admins collection exists --
+      // until then the in-app admin password is a UI gate only, and anyone who
+      // opens devtools can call the SDK directly.
+      allow write: if isSignedIn()
+        && isValidSection(sectionId)
+        && isValidSectionDoc(request.resource.data);
+    }
+
     match /reservations/{reservationId} {
-      allow read, write: if true;
+      allow read: if isSignedIn();
+      allow create, update: if isSignedIn()
+        && isValidReservation(reservationId, request.resource.data);
+      // Cancelling someone else's booking is currently open to any signed-in
+      // user, for the same reason as above: anonymous auth cannot tell a
+      // teacher from an administrator. Gate on isAdmin() once real sign-in
+      // lands, or add an `ownerUid` field and compare it here.
+      allow delete: if isSignedIn();
+    }
+
+    // One item in a laboratory's stock. Shape must match Material in
+    // src/types.ts.
+    //
+    // Optional fields are validated only when present, because the importer
+    // omits a key entirely rather than writing an empty string -- a blank
+    // spreadsheet cell should not become the literal text "undefined" in the
+    // stockroom listing.
+    function isValidMaterial(data) {
+      return data.keys().hasAll(['section', 'name', 'labId', 'location'])
+        && isValidSection(data.section)
+        && data.name is string && data.name.size() > 0 && data.name.size() <= 200
+        && data.labId is string && data.labId.size() > 0 && data.labId.size() <= 100
+        && data.location is string && data.location.size() > 0
+        && data.location.size() <= 200
+        && (!('code' in data) || (data.code is string && data.code.size() <= 60))
+        && (!('category' in data)
+             || data.category in ['chemical', 'equipment', 'glassware', 'consumable'])
+        && (!('quantity' in data) || (data.quantity is number && data.quantity >= 0))
+        && (!('minQuantity' in data) || (data.minQuantity is number && data.minQuantity >= 0))
+        && (!('unit' in data) || (data.unit is string && data.unit.size() <= 60))
+        && (!('hazard' in data) || (data.hazard is string && data.hazard.size() <= 60))
+        && (!('expiryDate' in data)
+             || (data.expiryDate is string && data.expiryDate.size() <= 10))
+        && (!('supplier' in data) || (data.supplier is string && data.supplier.size() <= 500))
+        && (!('notes' in data) || (data.notes is string && data.notes.size() <= 500))
+        && (!('updatedAt' in data)
+             || (data.updatedAt is string && data.updatedAt.size() <= 40));
+    }
+
+    match /materials/{materialId} {
+      allow read: if isSignedIn();
+      allow create, update: if isSignedIn() && isValidMaterial(request.resource.data);
+      // Open for the same reason as reservations: anonymous auth cannot
+      // distinguish the lab technician -- who owns this data -- from anyone
+      // else. Tighten with isAdmin() once real sign-in lands.
+      allow delete: if isSignedIn();
+    }
+
+    // Anything not matched above is denied.
+    match /{document=**} {
+      allow read, write: if false;
     }
   }
 }
