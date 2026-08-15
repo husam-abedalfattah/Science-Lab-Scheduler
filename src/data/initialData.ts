@@ -1,4 +1,6 @@
 import { AppState, Day, Lab } from '../types';
+import { reservationKey } from '../utils/scheduleKeys';
+import { SCHOOL_LABEL } from '../brand';
 
 export const DEFAULT_LABS: Lab[] = [
   { id: 'lab-1', name: 'Chemistry Lab', code: 'CHEM-01', capacity: 30, color: 'emerald' },
@@ -10,8 +12,8 @@ export const DEFAULT_LABS: Lab[] = [
 
 export const INITIAL_APP_STATE: AppState = {
   boys: {
-    name: 'Boys Section',
-    themeColor: 'emerald',
+    name: SCHOOL_LABEL.boys,
+    themeColor: 'brand-green',
     weekNumber: 1,
     deadlineDay: 0, // Sunday
     deadlineTime: '06:00',
@@ -28,7 +30,7 @@ export const INITIAL_APP_STATE: AppState = {
     classes: ['4A', '4B', '4C', '5A', '5B', '5C', '6A', '6B'],
     labs: [...DEFAULT_LABS],
     reservations: {
-      'sunday_p1_lab-1': [
+      [reservationKey('sunday', 1, 'lab-1')]: [
         {
           id: 'res-1',
           day: 'sunday',
@@ -49,12 +51,18 @@ export const INITIAL_APP_STATE: AppState = {
             needsPrintedWorksheets: true,
             worksheetCopies: 25
           }
-        },
+        }
+      ],
+      // Slot 1 of this period runs in the general-science room. It used to be
+      // booked into the Chemistry Lab alongside slot 0, which meant the seed
+      // data shipped a room double-booking and every fresh install opened with
+      // conflict alerts already showing.
+      [reservationKey('sunday', 1, 'lab-4')]: [
         {
           id: 'res-2',
           day: 'sunday',
           period: 1,
-          labId: 'lab-1',
+          labId: 'lab-4',
           slotIndex: 1,
           teacher: 'Husam Abed Alfattah',
           className: '4B',
@@ -71,7 +79,7 @@ export const INITIAL_APP_STATE: AppState = {
           }
         }
       ],
-      'sunday_p2_lab-2': [
+      [reservationKey('sunday', 2, 'lab-2')]: [
         {
           id: 'res-3',
           day: 'sunday',
@@ -94,7 +102,7 @@ export const INITIAL_APP_STATE: AppState = {
           }
         }
       ],
-      'monday_p3_lab-3': [
+      [reservationKey('monday', 3, 'lab-3')]: [
         {
           id: 'res-4',
           day: 'monday',
@@ -114,12 +122,15 @@ export const INITIAL_APP_STATE: AppState = {
             needsPrintedWorksheets: true,
             worksheetCopies: 26
           }
-        },
+        }
+      ],
+      // Moved out of the Physics Lab, which slot 0 already occupies this period.
+      [reservationKey('monday', 3, 'lab-4')]: [
         {
           id: 'res-5',
           day: 'monday',
           period: 3,
-          labId: 'lab-3',
+          labId: 'lab-4',
           slotIndex: 1,
           teacher: 'Sultan Al-Mansoor',
           className: '6B',
@@ -137,7 +148,7 @@ export const INITIAL_APP_STATE: AppState = {
           }
         }
       ],
-      'tuesday_p2_lab-4': [
+      [reservationKey('tuesday', 2, 'lab-4')]: [
         {
           id: 'res-6',
           day: 'tuesday',
@@ -163,8 +174,8 @@ export const INITIAL_APP_STATE: AppState = {
     history: []
   },
   girls: {
-    name: 'Girls Section',
-    themeColor: 'rose',
+    name: SCHOOL_LABEL.girls,
+    themeColor: 'brand-violet',
     weekNumber: 1,
     deadlineDay: 0, // Sunday
     deadlineTime: '06:00',
@@ -181,7 +192,7 @@ export const INITIAL_APP_STATE: AppState = {
     classes: ['4G1', '4G2', '5G1', '5G2', '5G3', '6G1', '6G2'],
     labs: [...DEFAULT_LABS],
     reservations: {
-      'sunday_p1_lab-2': [
+      [reservationKey('sunday', 1, 'lab-2')]: [
         {
           id: 'res-g1',
           day: 'sunday',
@@ -201,12 +212,15 @@ export const INITIAL_APP_STATE: AppState = {
             needsPrintedWorksheets: true,
             worksheetCopies: 24
           }
-        },
+        }
+      ],
+      // Moved out of the Biology Lab, which slot 0 already occupies this period.
+      [reservationKey('sunday', 1, 'lab-4')]: [
         {
           id: 'res-g2',
           day: 'sunday',
           period: 1,
-          labId: 'lab-2',
+          labId: 'lab-4',
           slotIndex: 1,
           teacher: 'Sara Al-Mutairi',
           className: '4G2',
@@ -223,7 +237,7 @@ export const INITIAL_APP_STATE: AppState = {
           }
         }
       ],
-      'wednesday_p4_lab-5': [
+      [reservationKey('wednesday', 4, 'lab-5')]: [
         {
           id: 'res-g3',
           day: 'wednesday',

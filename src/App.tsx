@@ -1,14 +1,39 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import { AppState, Day, Section, Reservation, ConflictAlert, ExperimentDetails, BlockedPeriod } from './types';
-import { INITIAL_APP_STATE, DEFAULT_LABS } from './data/initialData';
+import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { FlaskConical, AlertOctagon } from 'lucide-react';
+import {
+  AppState,
+  Day,
+  Section,
+  Reservation,
+  ConflictAlert,
+  ExperimentDetails,
+  SupervisorReview,
+  Material
+} from './types';
+import { INITIAL_APP_STATE } from './data/initialData';
 import { detectAllConflicts } from './utils/conflictDetector';
+import { themeFor } from './theme';
+import { SCHOOL_NAME, SCHOOL_NAME_AR, SCHOOL_LABEL, DEPARTMENT_NAME } from './brand';
+import {
+  ADMIN_PASSWORD,
+  MAX_TEACHER_NAME_LENGTH,
+  MAX_CLASS_NAME_LENGTH,
+  MAX_LAB_NAME_LENGTH
+} from './constants';
 import {
   seedInitialDataIfNeeded,
   subscribeToAppState,
   addOrUpdateReservation,
   removeReservation,
   updateSectionSettings,
-  openNewWeekInFirestore
+  openNewWeekInFirestore,
+  clearAllReservations,
+  setSupervisorReview,
+  subscribeToMaterials,
+  saveMaterial,
+  deleteMaterial,
+  upsertMaterials,
+  SlotTakenError
 } from './services/firebaseService';
 
 import { Header } from './components/Header';
@@ -18,49 +43,77 @@ import { BookingModal } from './components/BookingModal';
 import { ConflictResolverModal } from './components/ConflictResolverModal';
 import { AdminModal } from './components/AdminModal';
 import { HistoryModal } from './components/HistoryModal';
-import { LockPeriodModal } from './components/LockPeriodModal';
+import { LockPeriodModal, LockSlot } from './components/LockPeriodModal';
 import { SectionSelector } from './components/SectionSelector';
-import { NotificationToast, ToastMessage } from './components/NotificationToast';
+import { MaterialsModal } from './components/MaterialsModal';
+import { MaterialImportDialog } from './components/MaterialImportDialog';
+import { NotificationToast, ToastMessage, ToastAction } from './components/NotificationToast';
+import { ConfirmDialog, ConfirmRequest } from './components/ConfirmDialog';
+
+const LAST_SECTION_KEY = 'labScheduler.lastSection';
 
 export default function App() {
-  // App State with Firebase Firestore Realtime Sync
   const [appState, setAppState] = useState<AppState>(INITIAL_APP_STATE);
 
-  useEffect(() => {
-    // Seed initial data if Firestore is empty on first boot
-    seedInitialDataIfNeeded();
+  // Until Firestore answers, the app is rendering INITIAL_APP_STATE, which is
+  // demo content. Showing it as if it were real made phantom bookings appear
+  // and then vanish on every cold load.
+  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
-    // Subscribe to real-time changes in Firestore
-    const unsubscribe = subscribeToAppState((newState) => {
-      setAppState(newState);
+  useEffect(() => {
+    let cancelled = false;
+
+    // Seeding is best-effort: a database that is already populated needs no
+    // seed, and a genuine connectivity failure surfaces through the
+    // subscription's onError below. Failing here must not blank the app.
+    seedInitialDataIfNeeded().catch((err) => {
+      console.error('Initial seed skipped:', err);
     });
 
-    return () => unsubscribe();
+    const unsubscribe = subscribeToAppState({
+      onStateChange: (newState) => {
+        if (!cancelled) setAppState(newState);
+      },
+      onReady: () => {
+        if (!cancelled) {
+          setIsLoading(false);
+          setLoadError(null);
+        }
+      },
+      onError: (err) => {
+        if (cancelled) return;
+        setIsLoading(false);
+        setLoadError(
+          err instanceof Error
+            ? err.message
+            : 'Lost connection to the scheduling database.'
+        );
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
   }, []);
 
-  // Selected Section (starts as null to show section landing screen)
   const [currentSection, setCurrentSection] = useState<Section | null>(null);
-
-  // Admin Auth
   const [isAdminLoggedIn, setIsAdminLoggedIn] = useState<boolean>(false);
 
   // Filters
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [selectedLabFilter, setSelectedLabFilter] = useState<string>('ALL');
+  const [selectedTeacherFilter, setSelectedTeacherFilter] = useState<string>('ALL');
 
-  // Modals state
+  // Modals
   const [isBookingModalOpen, setIsBookingModalOpen] = useState<boolean>(false);
   const [bookingSlot, setBookingSlot] = useState<{
     day: Day;
     period: number;
     labId: string;
     slotIndex: number;
-  }>({
-    day: 'sunday',
-    period: 1,
-    labId: 'lab-1',
-    slotIndex: 0
-  });
+  }>({ day: 'sunday', period: 1, labId: 'lab-1', slotIndex: 0 });
 
   const [isConflictModalOpen, setIsConflictModalOpen] = useState<boolean>(false);
   const [isAdminModalOpen, setIsAdminModalOpen] = useState<boolean>(false);
@@ -68,58 +121,124 @@ export default function App() {
   const [isLockModalOpen, setIsLockModalOpen] = useState<boolean>(false);
   const [lockSlotTarget, setLockSlotTarget] = useState<{ day: Day; period: number } | null>(null);
 
-  // Toast Notification
+  const [confirmRequest, setConfirmRequest] = useState<ConfirmRequest | null>(null);
+
+  /**
+   * The materials inventory.
+   *
+   * Held whole rather than paged: Firestore cannot do substring search, and
+   * searching by name, code, location or supplier is the entire point of the
+   * feature. A school lab runs to hundreds of items, so the collection is small
+   * enough to filter in memory.
+   */
+  const [materials, setMaterials] = useState<Material[]>([]);
+  const [isMaterialsOpen, setIsMaterialsOpen] = useState(false);
+  const [isImportOpen, setIsImportOpen] = useState(false);
+
+  useEffect(() => subscribeToMaterials(setMaterials, err => {
+    console.error('Materials subscription error:', err);
+  }), []);
+
+  // Toast
   const [toast, setToast] = useState<ToastMessage | null>(null);
+  const toastTimerRef = useRef<number | null>(null);
 
-  const showToast = (message: string, type: 'success' | 'error' | 'info' = 'success') => {
-    setToast({ id: Date.now().toString(), type, message });
-    setTimeout(() => {
-      setToast(null);
-    }, 4000);
-  };
+  const showToast = useCallback(
+    (
+      message: string,
+      type: 'success' | 'error' | 'info' = 'success',
+      action?: ToastAction
+    ) => {
+      // Clearing the previous timer matters: without it an earlier timeout
+      // dismissed the newer toast partway through its own lifetime.
+      if (toastTimerRef.current !== null) {
+        window.clearTimeout(toastTimerRef.current);
+      }
+      setToast({ id: `${Date.now()}`, type, message, action });
+      toastTimerRef.current = window.setTimeout(
+        () => setToast(null),
+        action ? 8000 : 4000
+      );
+    },
+    []
+  );
 
-  // Active section data
-  const currentSectionData = appState[currentSection];
+  useEffect(
+    () => () => {
+      if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current);
+    },
+    []
+  );
+
+  // Restore the last section so returning users skip the picker.
+  useEffect(() => {
+    const saved = window.localStorage.getItem(LAST_SECTION_KEY);
+    if (saved === 'boys' || saved === 'girls') setCurrentSection(saved);
+  }, []);
+
+  const currentSectionData = currentSection ? appState[currentSection] : null;
   const otherSectionKey: Section = currentSection === 'boys' ? 'girls' : 'boys';
   const otherSectionData = appState[otherSectionKey];
 
-  // Real-time conflict recalculation
   const activeConflicts: ConflictAlert[] = useMemo(() => {
     if (!currentSectionData) return [];
     return detectAllConflicts(currentSectionData, otherSectionData);
   }, [currentSectionData, otherSectionData]);
 
-  // Count total booked slots
   const totalBookingsCount = useMemo(() => {
     if (!currentSectionData) return 0;
-    let count = 0;
-    Object.values(currentSectionData.reservations).forEach(list => {
-      if (Array.isArray(list)) count += list.length;
-    });
-    return count;
+    return Object.values(currentSectionData.reservations).reduce(
+      (count, list) => count + (Array.isArray(list) ? list.length : 0),
+      0
+    );
   }, [currentSectionData]);
 
   // --- HANDLERS ---
 
   const handleSelectSection = (sec: Section) => {
     setCurrentSection(sec);
+    window.localStorage.setItem(LAST_SECTION_KEY, sec);
   };
 
-  const handleOpenGeneralBook = () => {
-    const firstLab = currentSectionData.labs[0]?.id || 'lab-1';
-    setBookingSlot({ day: 'sunday', period: 1, labId: firstLab, slotIndex: 0 });
-    setIsBookingModalOpen(true);
+  const handleReturnToSectionSelect = () => {
+    setCurrentSection(null);
+    window.localStorage.removeItem(LAST_SECTION_KEY);
   };
 
-  const handleOpenQuickBook = (day: Day, period: number, labId: string, slotIndex: number) => {
-    // Check if schedule is explicitly locked by admin
-    if (currentSectionData && currentSectionData.isLocked && !isAdminLoggedIn) {
-      showToast(`Booking is currently locked by Administrator.`, 'error');
+  /** Shared guard for both entry points into the booking modal. */
+  const openBookingModal = (
+    day: Day,
+    period: number,
+    labId: string,
+    slotIndex: number
+  ) => {
+    if (!currentSectionData) return;
+
+    if (currentSectionData.isLocked && !isAdminLoggedIn) {
+      showToast('Booking is currently locked by the administrator.', 'error');
+      return;
+    }
+
+    const blocked = currentSectionData.blockedPeriods?.[`${day}_p${period}`];
+    if (blocked && !isAdminLoggedIn) {
+      showToast(`That period is blocked by the lab technician — ${blocked.reason}`, 'error');
       return;
     }
 
     setBookingSlot({ day, period, labId, slotIndex });
     setIsBookingModalOpen(true);
+  };
+
+  // The header's "Book Lab" button used to skip the lock check entirely,
+  // which made the administrator's schedule lock trivially bypassable.
+  const handleOpenGeneralBook = () => {
+    if (!currentSectionData) return;
+    const firstLab = currentSectionData.labs[0]?.id || 'lab-1';
+    openBookingModal('sunday', 1, firstLab, 0);
+  };
+
+  const handleOpenQuickBook = (day: Day, period: number, labId: string, slotIndex: number) => {
+    openBookingModal(day, period, labId, slotIndex);
   };
 
   const handleAddReservation = async (bookingData: {
@@ -132,11 +251,11 @@ export default function App() {
     subject?: string;
     isOverride?: boolean;
     experimentDetails?: ExperimentDetails;
-  }) => {
-    if (!currentSection) return;
+  }): Promise<boolean> => {
+    if (!currentSection) return false;
 
     const newRes: Reservation = {
-      id: `res-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+      id: '', // assigned by the service from the slot coordinates
       day: bookingData.day,
       period: bookingData.period,
       labId: bookingData.labId,
@@ -150,29 +269,96 @@ export default function App() {
     };
 
     try {
-      await addOrUpdateReservation(currentSection, newRes);
-      showToast(`Reservation confirmed for ${bookingData.teacher} (Slot ${bookingData.slotIndex + 1})`, 'success');
+      await addOrUpdateReservation(currentSection, newRes, Boolean(bookingData.isOverride));
+      showToast(
+        `Reservation confirmed for ${bookingData.teacher} (Slot ${bookingData.slotIndex + 1}).`,
+        'success'
+      );
+      return true;
     } catch (err) {
       console.error('Add reservation error:', err);
-      showToast('Failed to save reservation to cloud.', 'error');
+      showToast(
+        err instanceof SlotTakenError
+          ? err.message
+          : 'Failed to save the reservation. Check your connection and try again.',
+        'error'
+      );
+      return false;
     }
   };
 
-  const handleCancelReservation = async (reservationId: string) => {
-    if (!currentSection) return;
-
+  /**
+   * Records the lab supervisor's response to a booking.
+   *
+   * Fire-and-report rather than optimistic: the Firestore snapshot is the
+   * source of truth for every other open browser, and a decline that only
+   * appeared locally would be worse than none.
+   */
+  const handleSetSupervisorReview = async (
+    reservationId: string,
+    review: SupervisorReview | null
+  ) => {
     try {
-      await removeReservation(reservationId);
-      showToast('Reservation cancelled.', 'info');
+      await setSupervisorReview(reservationId, review);
+      showToast(
+        review === null
+          ? 'Review cleared.'
+          : review.status === 'declined'
+            ? 'Marked as “cannot prepare”. The teacher will see your reason.'
+            : 'Marked as reviewed.',
+        review?.status === 'declined' ? 'info' : 'success'
+      );
     } catch (err) {
-      console.error('Cancel reservation error:', err);
-      showToast('Failed to cancel reservation.', 'error');
+      console.error('Supervisor review error:', err);
+      showToast('Could not save the review.', 'error');
     }
   };
 
-  // Admin Actions
+  const handleCancelReservation = (reservationId: string) => {
+    if (!currentSection || !currentSectionData) return;
+
+    const target = Object.values(currentSectionData.reservations)
+      .flat()
+      .find(r => r && r.id === reservationId);
+
+    const doCancel = async () => {
+      try {
+        await removeReservation(reservationId);
+        showToast(
+          'Reservation cancelled.',
+          'info',
+          target
+            ? {
+                label: 'Undo',
+                onClick: () => {
+                  addOrUpdateReservation(currentSection, target, true).catch(() =>
+                    showToast('Could not restore the reservation.', 'error')
+                  );
+                }
+              }
+            : undefined
+        );
+      } catch (err) {
+        console.error('Cancel reservation error:', err);
+        showToast('Failed to cancel the reservation.', 'error');
+      }
+    };
+
+    setConfirmRequest({
+      title: 'Cancel this reservation?',
+      message: target
+        ? `${target.teacher} — Class ${target.className}, ${target.day} Period ${target.period}. You can undo this straight after.`
+        : 'This booking will be removed from the schedule.',
+      confirmLabel: 'Cancel booking',
+      onConfirm: () => {
+        void doCancel();
+      }
+    });
+  };
+
+  // Admin
   const handleAdminLogin = (pass: string) => {
-    if (pass === 'admin123') {
+    if (pass === ADMIN_PASSWORD) {
       setIsAdminLoggedIn(true);
       showToast('Admin access granted.', 'success');
       return true;
@@ -180,13 +366,19 @@ export default function App() {
     return false;
   };
 
+  const handleAdminLogout = () => {
+    setIsAdminLoggedIn(false);
+    setIsAdminModalOpen(false);
+    showToast('Admin session ended.', 'info');
+  };
+
   const handleUpdateDeadline = async (day: number, time: string) => {
     if (!currentSection) return;
     try {
       await updateSectionSettings(currentSection, { deadlineDay: day, deadlineTime: time });
       showToast('Booking cutoff deadline updated.', 'success');
-    } catch (err) {
-      showToast('Failed to update deadline.', 'error');
+    } catch {
+      showToast('Failed to update the deadline.', 'error');
     }
   };
 
@@ -194,193 +386,526 @@ export default function App() {
     if (!currentSection) return;
     try {
       await updateSectionSettings(currentSection, { isLocked });
-      showToast(`Schedule ${isLocked ? 'Locked' : 'Unlocked'} successfully.`, 'info');
-    } catch (err) {
-      showToast('Failed to update lock state.', 'error');
+      showToast(`Schedule ${isLocked ? 'locked' : 'unlocked'}.`, 'info');
+    } catch {
+      showToast('Failed to update the lock state.', 'error');
     }
   };
 
-  const handleOpenNewWeek = async () => {
+  const handleOpenNewWeek = () => {
     if (!currentSection || !currentSectionData) return;
 
+    setConfirmRequest({
+      title: `Archive week ${currentSectionData.weekNumber}?`,
+      message: `All ${totalBookingsCount} reservations for ${SCHOOL_LABEL[currentSection]} will be moved to the history log and the grid cleared for week ${currentSectionData.weekNumber + 1}. This cannot be undone.`,
+      confirmLabel: 'Archive and start new week',
+      onConfirm: () => {
+        void (async () => {
+          try {
+            const archivedWeek = currentSectionData.weekNumber;
+            await openNewWeekInFirestore(currentSection, currentSectionData);
+            setIsAdminModalOpen(false);
+            // Archiving clears the grid, so without a way straight back into
+            // the archive the week the user just filed appears to have simply
+            // vanished.
+            showToast(`Week ${archivedWeek} archived. New week opened.`, 'success', {
+              label: `View week ${archivedWeek}`,
+              onClick: () => setIsHistoryModalOpen(true)
+            });
+          } catch (err) {
+            console.error('Open new week error:', err);
+            showToast('Failed to open the new week.', 'error');
+          }
+        })();
+      }
+    });
+  };
+
+  /**
+   * Deletes every booking in the live week without archiving it.
+   *
+   * Separate from "archive and start next week" on purpose: that one keeps the
+   * week and rolls the counter, this one throws it away. The confirmation spells
+   * out that nothing is recoverable, because the two buttons sit in the same
+   * panel and the wrong one is unrecoverable.
+   */
+  const handleClearSchedule = () => {
+    if (!currentSection || !currentSectionData) return;
+
+    setConfirmRequest({
+      title: `Delete all ${totalBookingsCount} bookings?`,
+      message:
+        `Every booking in week ${currentSectionData.weekNumber} for ` +
+        `${SCHOOL_LABEL[currentSection]} will be permanently deleted. They are NOT ` +
+        `archived and cannot be recovered. Rosters, labs and period locks are ` +
+        `kept. To keep a copy instead, cancel and use "Archive and start week ` +
+        `${currentSectionData.weekNumber + 1}".`,
+      confirmLabel: 'Delete everything',
+      tone: 'danger',
+      onConfirm: () => {
+        void (async () => {
+          try {
+            const removed = await clearAllReservations(currentSection);
+            setIsAdminModalOpen(false);
+            showToast(
+              `Cleared ${removed} booking${removed === 1 ? '' : 's'} from week ` +
+                `${currentSectionData.weekNumber}.`,
+              'success'
+            );
+          } catch (err) {
+            console.error('Clear schedule error:', err);
+            showToast('Failed to clear the schedule.', 'error');
+          }
+        })();
+      }
+    });
+  };
+
+  /**
+   * Renames the current week without touching anything else.
+   *
+   * Needed because the week counter was previously write-only: it moved when
+   * you archived and never otherwise. An accidental archive, a vacation week,
+   * or a term that starts at week 5 all left the number wrong with no way to
+   * correct it short of archiving repeatedly -- which files an empty week into
+   * history each time.
+   */
+  const handleSetWeekNumber = async (week: number) => {
+    if (!currentSection) return;
+    if (!Number.isInteger(week) || week < 1) return;
+
     try {
-      await openNewWeekInFirestore(currentSection, currentSectionData);
-      setIsAdminModalOpen(false);
-      showToast('Schedule archived! New week opened.', 'success');
+      await updateSectionSettings(currentSection, { weekNumber: week });
+      showToast(`Now showing week ${week}.`, 'success');
     } catch (err) {
-      showToast('Failed to open new week.', 'error');
+      console.error('Set week number error:', err);
+      showToast('Could not change the week number.', 'error');
     }
+  };
+
+  const handleSaveMaterial = async (
+    material: Omit<Material, 'id' | 'updatedAt'> & { id?: string }
+  ) => {
+    try {
+      await saveMaterial({ ...material, updatedAt: '' });
+      showToast(material.id ? 'Material updated.' : 'Material added.', 'success');
+    } catch (err) {
+      console.error('Save material error:', err);
+      showToast('Could not save that material.', 'error');
+    }
+  };
+
+  const handleDeleteMaterial = (material: Material) => {
+    setConfirmRequest({
+      title: `Delete ${material.name}?`,
+      message:
+        'This removes the item from the stock list. Bookings and requisitions are not affected.',
+      confirmLabel: 'Delete item',
+      tone: 'danger',
+      onConfirm: () => {
+        void (async () => {
+          try {
+            await deleteMaterial(material.id);
+            showToast('Material deleted.', 'success');
+          } catch (err) {
+            console.error('Delete material error:', err);
+            showToast('Could not delete that material.', 'error');
+          }
+        })();
+      }
+    });
+  };
+
+  const handleImportMaterials = async (
+    rows: Omit<Material, 'id' | 'section' | 'updatedAt'>[]
+  ) => {
+    if (!currentSection) return { created: 0, updated: 0 };
+    const result = await upsertMaterials(currentSection, rows, materials);
+    showToast(
+      `Imported ${result.created} new and updated ${result.updated} item` +
+        `${result.created + result.updated === 1 ? '' : 's'}.`,
+      'success'
+    );
+    return result;
   };
 
   const handleAddTeacher = async (name: string) => {
     if (!currentSection || !currentSectionData) return;
+    if (name.length > MAX_TEACHER_NAME_LENGTH) {
+      showToast(
+        `Teacher names are limited to ${MAX_TEACHER_NAME_LENGTH} characters.`,
+        'error'
+      );
+      return;
+    }
+    if (currentSectionData.teachers.some(t => t.toLowerCase() === name.toLowerCase())) {
+      showToast(`"${name}" is already on the teacher list.`, 'error');
+      return;
+    }
     try {
-      const updated = [...currentSectionData.teachers, name];
-      await updateSectionSettings(currentSection, { teachers: updated });
+      await updateSectionSettings(currentSection, {
+        teachers: [...currentSectionData.teachers, name]
+      });
       showToast(`Teacher "${name}" added.`, 'success');
-    } catch (err) {
-      showToast('Failed to add teacher.', 'error');
+    } catch {
+      showToast('Failed to add the teacher.', 'error');
     }
   };
 
-  const handleRemoveTeacher = async (idx: number) => {
+  const handleRemoveTeacher = (idx: number) => {
     if (!currentSection || !currentSectionData) return;
-    try {
-      const updated = [...currentSectionData.teachers];
-      updated.splice(idx, 1);
-      await updateSectionSettings(currentSection, { teachers: updated });
-    } catch (err) {
-      showToast('Failed to remove teacher.', 'error');
-    }
+    const name = currentSectionData.teachers[idx];
+    if (!name) return;
+
+    setConfirmRequest({
+      title: `Remove ${name}?`,
+      message:
+        'They will no longer be selectable for new bookings. Existing reservations keep their name.',
+      confirmLabel: 'Remove teacher',
+      onConfirm: () => {
+        void (async () => {
+          try {
+            const updated = currentSectionData.teachers.filter((_, i) => i !== idx);
+            await updateSectionSettings(currentSection, { teachers: updated });
+            showToast(`Removed ${name}.`, 'info');
+          } catch {
+            showToast('Failed to remove the teacher.', 'error');
+          }
+        })();
+      }
+    });
   };
 
   const handleAddClass = async (className: string) => {
     if (!currentSection || !currentSectionData) return;
+    if (className.length > MAX_CLASS_NAME_LENGTH) {
+      showToast(`Class names are limited to ${MAX_CLASS_NAME_LENGTH} characters.`, 'error');
+      return;
+    }
+    if (currentSectionData.classes.some(c => c.toLowerCase() === className.toLowerCase())) {
+      showToast(`Class "${className}" already exists.`, 'error');
+      return;
+    }
     try {
-      const updated = [...currentSectionData.classes, className];
-      await updateSectionSettings(currentSection, { classes: updated });
+      await updateSectionSettings(currentSection, {
+        classes: [...currentSectionData.classes, className]
+      });
       showToast(`Class "${className}" added.`, 'success');
-    } catch (err) {
-      showToast('Failed to add class.', 'error');
+    } catch {
+      showToast('Failed to add the class.', 'error');
     }
   };
 
-  const handleRemoveClass = async (idx: number) => {
+  const handleRemoveClass = (idx: number) => {
     if (!currentSection || !currentSectionData) return;
-    try {
-      const updated = [...currentSectionData.classes];
-      updated.splice(idx, 1);
-      await updateSectionSettings(currentSection, { classes: updated });
-    } catch (err) {
-      showToast('Failed to remove class.', 'error');
-    }
+    const name = currentSectionData.classes[idx];
+    if (!name) return;
+
+    setConfirmRequest({
+      title: `Remove class ${name}?`,
+      message: 'It will no longer be selectable for new bookings.',
+      confirmLabel: 'Remove class',
+      onConfirm: () => {
+        void (async () => {
+          try {
+            const updated = currentSectionData.classes.filter((_, i) => i !== idx);
+            await updateSectionSettings(currentSection, { classes: updated });
+            showToast(`Removed class ${name}.`, 'info');
+          } catch {
+            showToast('Failed to remove the class.', 'error');
+          }
+        })();
+      }
+    });
   };
 
   const handleAddLab = async (name: string, code: string) => {
     if (!currentSection || !currentSectionData) return;
-    const newLab = {
-      id: `lab-${Date.now()}`,
-      name,
-      code,
-      capacity: 30,
-      color: 'indigo'
-    };
-    try {
-      const updated = [...currentSectionData.labs, newLab];
-      await updateSectionSettings(currentSection, { labs: updated });
-      showToast(`Lab "${name}" added to list.`, 'success');
-    } catch (err) {
-      showToast('Failed to add lab.', 'error');
+    if (name.length > MAX_LAB_NAME_LENGTH) {
+      showToast(`Lab names are limited to ${MAX_LAB_NAME_LENGTH} characters.`, 'error');
+      return;
     }
-  };
-
-  const handleRemoveLab = async (id: string) => {
-    if (!currentSection || !currentSectionData) return;
-    if (currentSectionData.labs.length <= 1) {
-      showToast('You must keep at least 1 lab available.', 'error');
+    if (currentSectionData.labs.some(l => l.name.toLowerCase() === name.toLowerCase())) {
+      showToast(`A lab called "${name}" already exists.`, 'error');
       return;
     }
     try {
-      const updated = currentSectionData.labs.filter(l => l.id !== id);
-      await updateSectionSettings(currentSection, { labs: updated });
-    } catch (err) {
-      showToast('Failed to remove lab.', 'error');
+      const newLab = {
+        id: `lab-${Date.now()}`,
+        name,
+        code,
+        capacity: 30,
+        color: 'indigo'
+      };
+      await updateSectionSettings(currentSection, {
+        labs: [...currentSectionData.labs, newLab]
+      });
+      showToast(`Lab "${name}" added.`, 'success');
+    } catch {
+      showToast('Failed to add the lab.', 'error');
     }
   };
 
-  const handleResetDemoData = () => {
-    setAppState(INITIAL_APP_STATE);
-    setIsAdminModalOpen(false);
-    showToast('Reset to default demo dataset.', 'info');
-  };
-
-  const handleSaveLockPeriod = async (day: Day, period: number, lockObj: BlockedPeriod | null) => {
+  const handleRemoveLab = (id: string) => {
     if (!currentSection || !currentSectionData) return;
-    const currentBlocks = { ...(currentSectionData.blockedPeriods || {}) };
-    const key = `${day}_p${period}`;
-
-    if (lockObj) {
-      currentBlocks[key] = lockObj;
-    } else {
-      delete currentBlocks[key];
+    if (currentSectionData.labs.length <= 1) {
+      showToast('You must keep at least one lab available.', 'error');
+      return;
     }
+    const lab = currentSectionData.labs.find(l => l.id === id);
+    if (!lab) return;
+
+    const affected = Object.values(currentSectionData.reservations)
+      .flat()
+      .filter(r => r && r.labId === id).length;
+
+    setConfirmRequest({
+      title: `Remove ${lab.name}?`,
+      message: affected
+        ? `${affected} existing reservation${affected === 1 ? '' : 's'} point at this room and will show an unknown lab. Remove it anyway?`
+        : 'This room will no longer be selectable for bookings.',
+      confirmLabel: 'Remove lab',
+      onConfirm: () => {
+        void (async () => {
+          try {
+            const updated = currentSectionData.labs.filter(l => l.id !== id);
+            await updateSectionSettings(currentSection, { labs: updated });
+            showToast(`Removed ${lab.name}.`, 'info');
+          } catch {
+            showToast('Failed to remove the lab.', 'error');
+          }
+        })();
+      }
+    });
+  };
+
+  const handleSaveLockPeriods = async (slots: LockSlot[], reason: string | null) => {
+    if (!currentSection || !currentSectionData || slots.length === 0) return;
+
+    /**
+     * Deliberately open, not admin-gated.
+     *
+     * Blocking a period is the lab technician's job -- it is how they say "I am
+     * covering a class / doing maintenance this period, do not book me". Making
+     * it an administrator action meant the one person who actually knows when
+     * the lab is unavailable had to go and find someone with the password, so
+     * in practice the blocks never got recorded and teachers booked into
+     * periods the lab could not service.
+     *
+     * This matches how the rest of the app already works: any teacher can
+     * cancel any booking. There is no per-user identity here (see README), so a
+     * gate on this one action bought nothing except friction.
+     *
+     * The section-wide booking lock in the admin panel is a different control
+     * and stays admin-only.
+     *
+     * The whole selection is applied as one merged write. Blocking a day used
+     * to be seven sequential round trips, each racing the snapshot that the
+     * previous one triggered.
+     */
+    const nextBlocks = { ...(currentSectionData.blockedPeriods || {}) };
+    const createdAt = new Date().toISOString();
+
+    slots.forEach(({ day, period }) => {
+      const key = `${day}_p${period}`;
+      if (reason === null) {
+        delete nextBlocks[key];
+      } else {
+        nextBlocks[key] = {
+          day,
+          period,
+          reason,
+          blockedBy: 'Lab Technician',
+          createdAt
+        };
+      }
+    });
+
+    const n = slots.length;
+    const label = n === 1 ? `${slots[0].day.toUpperCase()} period ${slots[0].period}` : `${n} periods`;
 
     try {
-      await updateSectionSettings(currentSection, { blockedPeriods: currentBlocks });
-      showToast(
-        lockObj 
-          ? `Period locked for ${day.toUpperCase()} Period ${period}.`
-          : `Unlocked ${day.toUpperCase()} Period ${period}.`, 
-        'success'
-      );
+      await updateSectionSettings(currentSection, { blockedPeriods: nextBlocks });
+      showToast(reason === null ? `Unblocked ${label}.` : `Blocked ${label}.`, 'success');
     } catch (err) {
-      console.error('Save lock period error:', err);
-      showToast('Failed to update period lock.', 'error');
+      console.error('Save period blocks error:', err);
+      showToast('Failed to update the period blocks.', 'error');
     }
   };
 
-  // If no section chosen, display SectionSelector
+  const openLockModal = (day?: Day, period?: number) => {
+    setLockSlotTarget(day && period ? { day, period } : null);
+    setIsLockModalOpen(true);
+  };
+
+  // --- RENDER ---
+
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4 font-sans">
+        <div className="text-center space-y-4">
+          <div className="w-14 h-14 bg-brand-kingdom-600 rounded-2xl mx-auto flex items-center justify-center text-white animate-pulse">
+            <FlaskConical className="w-7 h-7" />
+          </div>
+          <div>
+            <h1 className="text-base font-bold text-slate-900">Science Lab Scheduler</h1>
+            <p className="text-sm text-slate-500 mt-1">Loading this week's schedule…</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (loadError) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4 font-sans">
+        <div className="max-w-md w-full bg-white border border-slate-200 rounded-2xl shadow-lg p-8 text-center space-y-4">
+          <div className="w-12 h-12 rounded-2xl bg-brand-coral-100 text-brand-coral-800 mx-auto flex items-center justify-center">
+            <AlertOctagon className="w-6 h-6" />
+          </div>
+          <div>
+            <h1 className="text-lg font-bold text-slate-900">Can't reach the schedule</h1>
+            <p className="text-sm text-slate-600 mt-1">
+              The scheduler could not load live data, so nothing is shown rather than
+              stale or demo bookings.
+            </p>
+            <p className="text-[11px] text-slate-400 mt-2 font-mono break-words">{loadError}</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => window.location.reload()}
+            className="w-full py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-sm font-semibold transition"
+          >
+            Try again
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   if (!currentSection || !currentSectionData) {
     return (
       <>
-        <SectionSelector 
-          onSelectSection={handleSelectSection} 
-          onOpenAdmin={() => setIsAdminModalOpen(true)} 
+        <NotificationToast toast={toast} onClose={() => setToast(null)} />
+        <SectionSelector
+          onSelectSection={handleSelectSection}
+          onOpenAdmin={() => setIsAdminModalOpen(true)}
+          onOpenMaterials={() => setIsMaterialsOpen(true)}
         />
         <AdminModal
           isOpen={isAdminModalOpen}
           isAdminLoggedIn={isAdminLoggedIn}
+          section="boys"
           sectionData={appState.boys}
           onClose={() => setIsAdminModalOpen(false)}
           onLogin={handleAdminLogin}
+          onLogout={handleAdminLogout}
           onUpdateDeadline={handleUpdateDeadline}
+          onToggleLockSchedule={handleToggleLockSchedule}
           onOpenNewWeek={handleOpenNewWeek}
+        onClearSchedule={handleClearSchedule}
+        onSetWeekNumber={handleSetWeekNumber}
           onAddTeacher={handleAddTeacher}
           onRemoveTeacher={handleRemoveTeacher}
           onAddClass={handleAddClass}
           onRemoveClass={handleRemoveClass}
           onAddLab={handleAddLab}
           onRemoveLab={handleRemoveLab}
-          onResetDemoData={handleResetDemoData}
         />
+        {/* No school chosen yet, so this covers both and the importer -- which
+            writes into one school -- is not offered. */}
+        <MaterialsModal
+          isOpen={isMaterialsOpen}
+          section={null}
+          labsBySection={{ boys: appState.boys.labs, girls: appState.girls.labs }}
+          materials={materials}
+          onClose={() => setIsMaterialsOpen(false)}
+          onSave={handleSaveMaterial}
+          onDelete={handleDeleteMaterial}
+          onOpenImport={() => setIsImportOpen(true)}
+        />
+
+        <ConfirmDialog request={confirmRequest} onClose={() => setConfirmRequest(null)} />
       </>
     );
   }
 
-  const isBoys = currentSection === 'boys';
-  const bgThemeClass = isBoys
-    ? 'bg-emerald-50/90 text-slate-900 min-h-screen flex flex-col font-sans selection:bg-emerald-600 selection:text-white transition-colors duration-300'
-    : 'bg-pink-50/90 text-slate-900 min-h-screen flex flex-col font-sans selection:bg-pink-600 selection:text-white transition-colors duration-300';
+  const theme = themeFor(currentSection);
 
   return (
-    <div className={bgThemeClass}>
-      
-      {/* Toast Notification */}
+    <div
+      className={`${theme.page} ${theme.texture} ${theme.selection} text-slate-900 min-h-screen flex flex-col font-sans transition-colors duration-300 print:bg-white`}
+    >
       <NotificationToast toast={toast} onClose={() => setToast(null)} />
 
-      {/* Main App Header */}
       <Header
         currentSection={currentSection}
-        sectionName={currentSectionData.name}
         weekNumber={currentSectionData.weekNumber}
         conflictCount={activeConflicts.length}
         isAdminLoggedIn={isAdminLoggedIn}
+        isScheduleLocked={Boolean(currentSectionData.isLocked)}
         onSelectSection={handleSelectSection}
-        onReturnToSectionSelect={() => setCurrentSection(null)}
+        onReturnToSectionSelect={handleReturnToSectionSelect}
         onOpenQuickBook={handleOpenGeneralBook}
         onOpenHistory={() => setIsHistoryModalOpen(true)}
+        onOpenMaterials={() => setIsMaterialsOpen(true)}
         onOpenAdmin={() => setIsAdminModalOpen(true)}
         onOpenConflictResolver={() => setIsConflictModalOpen(true)}
-        onOpenLockModal={() => {
-          setLockSlotTarget(null);
-          setIsLockModalOpen(true);
-        }}
+        onOpenLockModal={() => openLockModal()}
       />
 
-      {/* Main Content View */}
-      <main className="max-w-7xl mx-auto px-4 py-6 flex-grow w-full">
-        
-        {/* Statistics & Filter Controls */}
+      {/* The schedule is a five-day matrix; a 7xl container left ~265px of the
+          viewport unused while the table overflowed by ~198px and Thursday fell
+          off the edge. The cap is now wide enough for the full week and still
+          stops the layout stretching absurdly on an ultrawide display. */}
+      <main className="max-w-[1700px] mx-auto px-4 py-6 flex-grow w-full">
+        {/* Printed masthead. The app header is `print:hidden`, so a printed
+            schedule used to come out of the printer carrying no school name, no
+            school, no week number and no date -- a grid of names with nothing
+            saying what it was. This block only exists on paper. */}
+        <div className="hidden print:block mb-4 pb-3 border-b-2 border-black">
+          <div className="flex items-end justify-between gap-4">
+            <div>
+              <p className="text-base font-black text-black leading-tight">{SCHOOL_NAME}</p>
+              <p className="text-sm font-bold text-black leading-tight" lang="ar" dir="rtl">
+                {SCHOOL_NAME_AR}
+              </p>
+              <p className="text-xs text-black mt-1">{DEPARTMENT_NAME}</p>
+            </div>
+            <div className="text-right text-xs text-black shrink-0">
+              <p className="text-sm font-bold uppercase tracking-wide">
+                {/* A filtered printout has to say so on the page. Handing a
+                    teacher a sheet headed "Weekly lab schedule" that silently
+                    contains only their own sessions invites it being read as
+                    the whole week's. */}
+                {selectedTeacherFilter === 'ALL'
+                  ? 'Weekly lab schedule'
+                  : 'Personal lab schedule'}
+              </p>
+              {selectedTeacherFilter !== 'ALL' && (
+                <p className="text-sm font-bold mt-0.5">{selectedTeacherFilter}</p>
+              )}
+              <p className="mt-0.5">
+                {SCHOOL_LABEL[currentSection]} · Week {currentSectionData.weekNumber}
+              </p>
+              {selectedLabFilter !== 'ALL' && (
+                <p className="mt-0.5">
+                  {currentSectionData.labs.find(l => l.id === selectedLabFilter)?.name ||
+                    selectedLabFilter}{' '}
+                  only
+                </p>
+              )}
+              <p className="mt-0.5">
+                Printed {new Date().toLocaleDateString([], {
+                  year: 'numeric',
+                  month: 'short',
+                  day: 'numeric'
+                })}
+              </p>
+            </div>
+          </div>
+        </div>
+
         <StatsBar
           totalBookings={totalBookingsCount}
           totalLabs={currentSectionData.labs.length}
@@ -388,15 +913,19 @@ export default function App() {
           labsList={currentSectionData.labs}
           searchQuery={searchQuery}
           selectedLabFilter={selectedLabFilter}
+          selectedTeacherFilter={selectedTeacherFilter}
+          teachersList={currentSectionData.teachers}
+          onTeacherFilterChange={setSelectedTeacherFilter}
           onSearchChange={setSearchQuery}
           onLabFilterChange={setSelectedLabFilter}
           onResetFilters={() => {
             setSearchQuery('');
             setSelectedLabFilter('ALL');
+            setSelectedTeacherFilter('ALL');
           }}
+          onOpenConflicts={() => setIsConflictModalOpen(true)}
         />
 
-        {/* Schedule Matrix Grid */}
         <ScheduleGrid
           section={currentSection}
           labs={currentSectionData.labs}
@@ -404,25 +933,21 @@ export default function App() {
           conflicts={activeConflicts}
           searchQuery={searchQuery}
           selectedLabFilter={selectedLabFilter}
+          selectedTeacherFilter={selectedTeacherFilter}
+          teacherRoster={currentSectionData.teachers}
           blockedPeriods={currentSectionData.blockedPeriods || {}}
+          isAdminLoggedIn={isAdminLoggedIn}
+          isScheduleLocked={Boolean(currentSectionData.isLocked)}
           onQuickBook={handleOpenQuickBook}
           onCancelReservation={handleCancelReservation}
-          onOpenLockModal={(day, period) => {
-            if (day && period) {
-              setLockSlotTarget({ day, period });
-            } else {
-              setLockSlotTarget(null);
-            }
-            setIsLockModalOpen(true);
-          }}
+          onSetSupervisorReview={handleSetSupervisorReview}
+          onOpenLockModal={openLockModal}
         />
-
       </main>
 
-      {/* Simple Footer */}
       <footer className="py-4 bg-white border-t border-slate-200 text-slate-500 text-xs px-6 flex items-center justify-between print:hidden">
         <span>Science Lab Scheduler</span>
-        <span>Easy & Fast Lab Reservations</span>
+        <span>Week {currentSectionData.weekNumber} · {SCHOOL_LABEL[currentSection]}</span>
       </footer>
 
       {/* MODALS */}
@@ -449,24 +974,29 @@ export default function App() {
       <AdminModal
         isOpen={isAdminModalOpen}
         isAdminLoggedIn={isAdminLoggedIn}
+        section={currentSection}
         sectionData={currentSectionData}
         onClose={() => setIsAdminModalOpen(false)}
         onLogin={handleAdminLogin}
+        onLogout={handleAdminLogout}
         onUpdateDeadline={handleUpdateDeadline}
         onToggleLockSchedule={handleToggleLockSchedule}
         onOpenNewWeek={handleOpenNewWeek}
+        onClearSchedule={handleClearSchedule}
+        onSetWeekNumber={handleSetWeekNumber}
         onAddTeacher={handleAddTeacher}
         onRemoveTeacher={handleRemoveTeacher}
         onAddClass={handleAddClass}
         onRemoveClass={handleRemoveClass}
         onAddLab={handleAddLab}
         onRemoveLab={handleRemoveLab}
-        onResetDemoData={handleResetDemoData}
       />
 
       <HistoryModal
         isOpen={isHistoryModalOpen}
+        section={currentSection}
         sectionData={currentSectionData}
+        labs={currentSectionData.labs}
         onClose={() => setIsHistoryModalOpen(false)}
       />
 
@@ -476,9 +1006,30 @@ export default function App() {
         initialDay={lockSlotTarget?.day || 'sunday'}
         initialPeriod={lockSlotTarget?.period || 1}
         onClose={() => setIsLockModalOpen(false)}
-        onSaveLock={handleSaveLockPeriod}
+        onSaveLocks={handleSaveLockPeriods}
       />
 
+      <MaterialsModal
+        isOpen={isMaterialsOpen}
+        section={currentSection}
+        labsBySection={{ boys: appState.boys.labs, girls: appState.girls.labs }}
+        materials={materials}
+        onClose={() => setIsMaterialsOpen(false)}
+        onSave={handleSaveMaterial}
+        onDelete={handleDeleteMaterial}
+        onOpenImport={() => setIsImportOpen(true)}
+      />
+
+      <MaterialImportDialog
+        isOpen={isImportOpen}
+        section={currentSection}
+        labs={currentSectionData.labs}
+        existing={materials}
+        onClose={() => setIsImportOpen(false)}
+        onImport={handleImportMaterials}
+      />
+
+      <ConfirmDialog request={confirmRequest} onClose={() => setConfirmRequest(null)} />
     </div>
   );
 }

@@ -1,32 +1,298 @@
 @import "tailwindcss";
 
+/*
+ * Riyadh Schools Al Malqa visual identity.
+ *
+ * Everything below is derived from "Brief Guide to the Brand Book Use /
+ * الدليل المختصر لاستخدام الهوية البصرية" (kept in the repo root):
+ *   p.2 logo, p.3 colours, p.4 fonts, p.6 approved wording.
+ *
+ * Do not introduce a colour or a typeface that is not in here. If the brand
+ * book is revised, change these tokens -- not the components.
+ */
+
+/* --- p.4 Fonts: Adelle Sans ARA is the only approved typeface. ------------
+ *
+ * The font files are not redistributable, so they are not committed. Drop them
+ * into `public/brand/fonts/` (see public/brand/README.md) and every one of
+ * these rules starts resolving. Until then each `src` 404s and the browser
+ * falls through to the next family in `--font-sans`, so the app degrades to
+ * the system UI font instead of breaking.
+ *
+ * Weight mapping is the brand book's, not ours:
+ *   300 Light / 400 Regular  -> body copy and frequent correspondence
+ *   600 SemiBold / 700 Bold  -> emphasised words and phrases
+ *   800 ExtraBold / 900 Heavy-> titles and sub-titles
+ */
+@font-face {
+  font-family: "Adelle Sans ARA";
+  src: url("/brand/fonts/AdelleSansARA-Light.woff2") format("woff2");
+  font-weight: 300;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Adelle Sans ARA";
+  src: url("/brand/fonts/AdelleSansARA-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Adelle Sans ARA";
+  src: url("/brand/fonts/AdelleSansARA-SemiBold.woff2") format("woff2");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Adelle Sans ARA";
+  src: url("/brand/fonts/AdelleSansARA-Bold.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Adelle Sans ARA";
+  src: url("/brand/fonts/AdelleSansARA-ExtraBold.woff2") format("woff2");
+  font-weight: 800;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Adelle Sans ARA";
+  src: url("/brand/fonts/AdelleSansARA-Heavy.woff2") format("woff2");
+  font-weight: 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@theme {
+  /* p.4 -- `font-sans` (used app-wide) now resolves to the approved face. */
+  --font-sans: "Adelle Sans ARA", ui-sans-serif, system-ui, -apple-system,
+    BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+
+  /* --- p.3 Colours -------------------------------------------------------
+   * The seven brand colours, each expanded into a ramp so ordinary UI states
+   * (hover, subtle backgrounds, borders) stay inside the identity. Ramps were
+   * interpolated in OKLab; the step carrying the brand book's exact hex is
+   * marked and must not be edited.
+   *
+   * Role assignment used across the app:
+   *   kingdom -> primary chrome, admin, official documents
+   *   green   -> Boys School theme        violet -> Girls School theme
+   *   coral   -> destructive / conflicts  yellow -> warnings
+   *   aqua    -> informational            plum   -> soft accent
+   */
+
+  /* Kingdom Green -- brand book p.3, anchor #006166 at 700 */
+  --color-brand-kingdom-50: #e5efef;
+  --color-brand-kingdom-100: #d3e7e8;
+  --color-brand-kingdom-200: #b4d8da;
+  --color-brand-kingdom-300: #8fc5c9;
+  --color-brand-kingdom-400: #65aeb2;
+  --color-brand-kingdom-500: #3e959b;
+  --color-brand-kingdom-600: #1e7b81;
+  --color-brand-kingdom-700: #006166; /* exact */
+  --color-brand-kingdom-800: #004d51;
+  --color-brand-kingdom-900: #003e41;
+  --color-brand-kingdom-950: #002326;
+
+  /* Electric Green -- brand book p.3, anchor #00d47d at 500 */
+  --color-brand-green-50: #f1fff7;
+  --color-brand-green-100: #e4fff0;
+  --color-brand-green-200: #c2ffd8;
+  --color-brand-green-300: #94f7ba;
+  --color-brand-green-400: #5be799;
+  --color-brand-green-500: #00d47d; /* exact */
+  --color-brand-green-600: #00b863;
+  --color-brand-green-700: #009a4e;
+  --color-brand-green-800: #007e3e;
+  --color-brand-green-900: #006832;
+  --color-brand-green-950: #00421d;
+
+  /* Coral -- brand book p.3, anchor #ff7d54 at 500 */
+  --color-brand-coral-50: #fff9f3;
+  --color-brand-coral-100: #ffefe3;
+  --color-brand-coral-200: #ffd8c3;
+  --color-brand-coral-300: #ffbb9e;
+  --color-brand-coral-400: #ff9a76;
+  --color-brand-coral-500: #ff7d54; /* exact */
+  --color-brand-coral-600: #e26239;
+  --color-brand-coral-700: #bf4e28;
+  --color-brand-coral-800: #9d3e1e;
+  --color-brand-coral-900: #823117;
+  --color-brand-coral-950: #541c0a;
+
+  /* Dark Violet -- brand book p.3, anchor #7d4fc4 at 600 */
+  --color-brand-violet-50: #ede9f9;
+  --color-brand-violet-100: #e5dcfd;
+  --color-brand-violet-200: #d6c5fe;
+  --color-brand-violet-300: #c4a9fc;
+  --color-brand-violet-400: #ad88f2;
+  --color-brand-violet-500: #9669e1;
+  --color-brand-violet-600: #7d4fc4; /* exact */
+  --color-brand-violet-700: #673da6;
+  --color-brand-violet-800: #532f87;
+  --color-brand-violet-900: #43256f;
+  --color-brand-violet-950: #281346;
+
+  /* Yellow -- brand book p.3, anchor #ffd169 at 400 */
+  --color-brand-yellow-50: #fffdef;
+  --color-brand-yellow-100: #fffce0;
+  --color-brand-yellow-200: #fffbc8;
+  --color-brand-yellow-300: #ffe89c;
+  --color-brand-yellow-400: #ffd169; /* exact */
+  --color-brand-yellow-500: #e7b32e;
+  --color-brand-yellow-600: #c99600;
+  --color-brand-yellow-700: #a97c00;
+  --color-brand-yellow-800: #8a6400;
+  --color-brand-yellow-900: #725200;
+  --color-brand-yellow-950: #483200;
+
+  /* Plum -- brand book p.3, anchor #cfb2fc at 300 */
+  --color-brand-plum-50: #f4effd;
+  --color-brand-plum-100: #ede2ff;
+  --color-brand-plum-200: #dfccff;
+  --color-brand-plum-300: #cfb2fc; /* exact */
+  --color-brand-plum-400: #bb95f3;
+  --color-brand-plum-500: #a77ae3;
+  --color-brand-plum-600: #9063ca;
+  --color-brand-plum-700: #784fab;
+  --color-brand-plum-800: #613f8c;
+  --color-brand-plum-900: #503374;
+  --color-brand-plum-950: #311d4a;
+
+  /* Aqua -- brand book p.3, anchor #00ccf5 at 500 */
+  --color-brand-aqua-50: #f1ffff;
+  --color-brand-aqua-100: #e3ffff;
+  --color-brand-aqua-200: #c4ffff;
+  --color-brand-aqua-300: #95f2ff;
+  --color-brand-aqua-400: #5be0ff;
+  --color-brand-aqua-500: #00ccf5; /* exact */
+  --color-brand-aqua-600: #00afd8;
+  --color-brand-aqua-700: #0092b6;
+  --color-brand-aqua-800: #007795;
+  --color-brand-aqua-900: #00627c;
+  --color-brand-aqua-950: #003e50;
+}
+
 @layer components {
+  /*
+   * Light type on a dark ground.
+   *
+   * Two things are working against legibility on the booked (dark red) cards.
+   * Subpixel antialiasing fattens light-on-dark text, and -- because only
+   * Adelle Sans ARA Regular is installed -- every `font-bold` here is a
+   * browser-synthesised faux bold, which smears at 12-13px. Greyscale
+   * antialiasing removes the first problem and visibly reduces the second.
+   *
+   * The real fix for the second one is dropping the Bold and SemiBold files
+   * into public/brand/fonts/; see that folder's README.
+   */
+  .type-on-dark {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+
+  /*
+   * The identity's diamond motif (brand book p.5), as a page texture.
+   *
+   * Two jobs: it fills the large empty grounds that otherwise read as blank
+   * white, and -- painted in the school's own colour -- it makes which school
+   * you are looking at unmissable from across the room. Teachers book into the
+   * wrong school otherwise, and nothing about a reservation says which one it
+   * landed in.
+   *
+   * Built from gradients rather than an image so each school can tint it
+   * without shipping a second asset. Kept faint: it sits behind content, and
+   * every card on top of it is opaque white.
+   */
+  .brand-texture {
+    background-image:
+      linear-gradient(45deg, var(--brand-texture) 25%, transparent 25%),
+      linear-gradient(-45deg, var(--brand-texture) 25%, transparent 25%),
+      linear-gradient(45deg, transparent 75%, var(--brand-texture) 75%),
+      linear-gradient(-45deg, transparent 75%, var(--brand-texture) 75%);
+    background-size: 44px 44px;
+    background-position: 0 0, 0 22px, 22px -22px, -22px 0;
+  }
+
+  /* Boys School -- Electric Green */
+  .brand-texture-boys {
+    --brand-texture: rgba(0, 212, 125, 0.16);
+  }
+
+  /* Girls School -- Dark Violet */
+  .brand-texture-girls {
+    --brand-texture: rgba(125, 79, 196, 0.16);
+  }
+
+  /* The school picker, before a school is chosen: the institutional colour. */
+  .brand-texture-kingdom {
+    --brand-texture: rgba(255, 255, 255, 0.07);
+  }
+
+  /* Texture is decoration; on paper it is just toner. */
+  @media print {
+    .brand-texture {
+      background-image: none !important;
+    }
+  }
+
+  /* The printed requisition form is an official school document, so its
+     structural colour is Kingdom Green rather than the neutral near-black it
+     used to be. */
   .rsm-official-report {
-    font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-    color: #0f172a;
+    font-family: "Adelle Sans ARA", ui-sans-serif, system-ui, -apple-system,
+      BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    color: #002326;
     background-color: #ffffff;
   }
 
   .rsm-official-header {
-    border-bottom: 2px solid #0f172a;
+    border-bottom: 2px solid #006166;
     padding-bottom: 1rem;
     margin-bottom: 1.25rem;
   }
 
   .rsm-official-box {
-    background-color: #0f172a;
+    background-color: #006166;
     color: #ffffff;
     border-radius: 0.375rem;
     padding: 0.875rem 1rem;
-    border: 1px solid #0f172a;
+    border: 1px solid #006166;
   }
 
   .rsm-official-card {
-    border: 1px solid #cbd5e1;
+    border: 1px solid #b4d8da;
     border-radius: 0.5rem;
     background-color: #ffffff;
     padding: 1rem;
     margin-bottom: 1.25rem;
+  }
+}
+
+/*
+ * Users who have asked their OS for reduced motion get none.
+ *
+ * The app leans on `transition` in about ninety places plus an `animate-pulse`
+ * loading state, and had no guard at all -- for a vestibular-sensitive user
+ * that is the whole interface moving with no way to turn it off.
+ *
+ * Durations collapse to ~0 rather than to `none` so that transitionend
+ * listeners still fire and nothing waits forever on an event that never
+ * arrives. The end state is identical; only the travel is removed.
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }
 
@@ -52,12 +318,24 @@
     display: none !important;
   }
 
-  /* Hide interactive non-printable elements */
+  /* Hide interactive non-printable elements.
+     `.print-keep` opts out: some report content (the attachment filename) is
+     rendered as a button so it can be clicked on screen, and blanket-hiding
+     every button dropped that line from the printed requisition form. */
   .print\:hidden,
-  button,
+  button:not(.print-keep),
   select,
   .no-print {
     display: none !important;
+  }
+
+  /* Printed, it is a value not a control -- drop the affordances. */
+  .print-keep {
+    text-decoration: none !important;
+    color: #002326 !important;
+    background: transparent !important;
+    border: 0 !important;
+    padding: 0 !important;
   }
 
   /* Reset modal positioning for print */
@@ -95,6 +373,40 @@
     padding: 4px !important;
     font-size: 8pt !important;
     word-break: break-word !important;
+    /* Tailwind's borders are colour utilities and the grid reads as a soup of
+       names without them once the fills drop out. Draw the rules explicitly so
+       the printed matrix is actually a matrix. */
+    border: 1px solid #94a3b8 !important;
+    vertical-align: top !important;
+  }
+
+  /* Kingdom Green, the same structural colour the requisition form uses, so a
+     printed schedule and a printed requisition read as the same school's
+     documents rather than two unrelated printouts. */
+  .master-schedule-table th {
+    background: #006166 !important;
+    color: #ffffff !important;
+    font-weight: 700 !important;
+    border-color: #004d51 !important;
+  }
+
+  /* The period column is a header too, but a full green column is heavy on a
+     page this dense -- keep it a tint. */
+  .master-schedule-table tbody th {
+    background: #e5efef !important;
+    color: #002326 !important;
+    border-color: #b4d8da !important;
+  }
+
+  /* A week that spills onto a second sheet repeats the day names, instead of
+     handing over a page of unlabelled columns. */
+  .master-schedule-table thead {
+    display: table-header-group !important;
+  }
+
+  .master-schedule-table tr {
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
   }
 
   .break-inside-avoid {

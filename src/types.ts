@@ -15,6 +15,25 @@ export interface ExperimentDetails {
   worksheetCopies?: number;
 }
 
+/**
+ * The lab supervisor's response to a booking.
+ *
+ * A booking used to be a one-way message: the teacher filed a requisition and
+ * found out on the day whether the lab could actually service it. This records
+ * the supervisor having looked, and -- when they cannot take it -- why, so the
+ * teacher can re-plan instead of arriving to an unprepared room.
+ *
+ * `reason` is required for `declined` and ignored for `acknowledged`; see
+ * SUPERVISOR_DECLINE_REASONS in constants.ts for the offered set.
+ */
+export type SupervisorReviewStatus = 'acknowledged' | 'declined';
+
+export interface SupervisorReview {
+  status: SupervisorReviewStatus;
+  reason?: string;
+  reviewedAt: string; // ISO
+}
+
 export interface Reservation {
   id: string;
   day: Day;
@@ -27,6 +46,48 @@ export interface Reservation {
   createdAt: string;
   isOverride?: boolean;
   experimentDetails?: ExperimentDetails;
+  supervisorReview?: SupervisorReview;
+}
+
+/**
+ * What kind of thing this is. Drives filtering and the hazard prompt.
+ */
+export type MaterialCategory = 'chemical' | 'equipment' | 'glassware' | 'consumable';
+
+/**
+ * One item held in a laboratory.
+ *
+ * Scoped per school like everything else: the two schools keep separate
+ * stockrooms and separate rosters, and a shared catalogue would make "where is
+ * it" ambiguous, which is the one question this table exists to answer.
+ *
+ * `labId` points at a Lab in the same school. Import resolves it from the
+ * spreadsheet's lab *name* or code; a row whose lab cannot be resolved is
+ * reported rather than silently filed somewhere wrong.
+ */
+export interface Material {
+  id: string;
+  section: Section;
+
+  /** Required. */
+  name: string;
+  labId: string;
+  location: string;
+
+  /** Optional. `code` is the import's match key when present. */
+  code?: string;
+  category?: MaterialCategory;
+  quantity?: number;
+  unit?: string;
+  /** Low-stock threshold: flagged when `quantity` is at or below this. */
+  minQuantity?: number;
+  hazard?: string;
+  /** ISO `YYYY-MM-DD`. */
+  expiryDate?: string;
+  supplier?: string;
+  notes?: string;
+
+  updatedAt: string;
 }
 
 export interface Lab {

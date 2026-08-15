@@ -1,7 +1,13 @@
-import React, { useState } from 'react';
-import { X, Lock, Unlock, Calendar, Clock, AlertOctagon, CheckCircle2, ShieldAlert, Sparkles, Trash2, Save } from 'lucide-react';
-import { Day, SectionData, BlockedPeriod } from '../types';
+import React, { useEffect, useMemo, useState } from 'react';
+import { X, Lock, Unlock, Calendar, AlertOctagon } from 'lucide-react';
+import { Day, SectionData } from '../types';
 import { DAYS_LIST, PERIODS_LIST } from '../data/initialData';
+import { useModalA11y } from '../hooks/useModalA11y';
+
+export interface LockSlot {
+  day: Day;
+  period: number;
+}
 
 interface LockPeriodModalProps {
   isOpen: boolean;
@@ -9,275 +15,380 @@ interface LockPeriodModalProps {
   initialDay?: Day;
   initialPeriod?: number;
   onClose: () => void;
-  onSaveLock: (day: Day, period: number, lockObj: BlockedPeriod | null) => Promise<void>;
+  /** `reason === null` unblocks every slot passed in. One write, not one per slot. */
+  onSaveLocks: (slots: LockSlot[], reason: string | null) => Promise<void>;
 }
 
 const COMMON_REASONS = [
-  'Covering class session',
-  'Busy preparing lab practical & chemicals',
-  'Laboratory maintenance & equipment check',
-  'Assisting out-of-lab science exam',
-  'Chemical inventory & stocktaking'
+  'Covering a class session',
+  'Preparing lab practical and chemicals',
+  'Laboratory maintenance and equipment check',
+  'Assisting an out-of-lab science exam',
+  'Chemical inventory and stocktaking'
 ];
 
+const keyOf = (day: Day, period: number) => `${day}_p${period}`;
+const parseKey = (k: string): LockSlot => {
+  const [day, p] = k.split('_p');
+  return { day: day as Day, period: Number(p) };
+};
+
+/**
+ * Blocking periods, several at a time.
+ *
+ * The technician's real unit of unavailability is rarely one period -- it is a
+ * morning, a whole day of maintenance, or "period 4 every day this week for
+ * exams". Locking those one cell at a time meant seven interactions and seven
+ * writes for one fact, so in practice only the most urgent block got recorded.
+ *
+ * The selector is a period × day matrix rather than the previous day-columns,
+ * because that shape gives both bulk gestures for free: the row header selects
+ * one period across the week, the column header selects a whole day.
+ */
 export const LockPeriodModal: React.FC<LockPeriodModalProps> = ({
   isOpen,
   sectionData,
   initialDay = 'sunday',
   initialPeriod = 1,
   onClose,
-  onSaveLock,
+  onSaveLocks
 }) => {
-  const [selectedDay, setSelectedDay] = useState<Day>(initialDay);
-  const [selectedPeriod, setSelectedPeriod] = useState<number>(initialPeriod);
+  const panelRef = useModalA11y(isOpen, onClose);
 
-  const currentKey = `${selectedDay}_p${selectedPeriod}`;
-  const existingLock: BlockedPeriod | undefined = sectionData.blockedPeriods?.[currentKey];
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [reason, setReason] = useState('');
+  const [isSaving, setIsSaving] = useState(false);
 
-  const [reason, setReason] = useState<string>(existingLock?.reason || '');
-  const [isSaving, setIsSaving] = useState<boolean>(false);
+  const blocked = sectionData.blockedPeriods || {};
 
-  // Sync when day or period changes
-  const handleSelectSlot = (day: Day, period: number) => {
-    setSelectedDay(day);
-    setSelectedPeriod(period);
-    const key = `${day}_p${period}`;
-    const lockObj = sectionData.blockedPeriods?.[key];
-    setReason(lockObj?.reason || '');
+  /**
+   * Opening from a grid cell preselects that cell. These were plain useState
+   * initialisers once, which React evaluates only on mount -- and because the
+   * modal stays mounted (the isOpen guard runs after the hooks), every open
+   * landed on Sunday period 1 regardless of which slot was clicked.
+   */
+  useEffect(() => {
+    if (!isOpen) return;
+    const k = keyOf(initialDay, initialPeriod);
+    setSelected(new Set([k]));
+    setReason(sectionData.blockedPeriods?.[k]?.reason || '');
+    setIsSaving(false);
+    // sectionData is deliberately excluded: re-running on every Firestore
+    // snapshot would discard what the user is typing.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, initialDay, initialPeriod]);
+
+  const toggle = (day: Day, period: number) => {
+    const k = keyOf(day, period);
+    setSelected(prev => {
+      const next = new Set(prev);
+      if (next.has(k)) next.delete(k);
+      else next.add(k);
+      return next;
+    });
   };
+
+  /** Select the whole group unless it is already fully selected, then clear it. */
+  const toggleGroup = (keys: string[]) => {
+    setSelected(prev => {
+      const next = new Set(prev);
+      const allOn = keys.every(k => next.has(k));
+      keys.forEach(k => (allOn ? next.delete(k) : next.add(k)));
+      return next;
+    });
+  };
+
+  const selectedKeys = useMemo(() => [...selected], [selected]);
+  const selectedSlots = useMemo(() => selectedKeys.map(parseKey), [selectedKeys]);
+  const lockedInSelection = selectedKeys.filter(k => blocked[k]);
+  const unlockedInSelection = selectedKeys.filter(k => !blocked[k]);
 
   if (!isOpen) return null;
 
-  const handleSave = async (e: React.FormEvent) => {
+  const run = async (nextReason: string | null, slots: LockSlot[]) => {
+    if (isSaving || slots.length === 0) return;
+    setIsSaving(true);
+    try {
+      await onSaveLocks(slots, nextReason);
+      if (nextReason === null) setReason('');
+    } catch (err) {
+      console.error('Failed to update period locks:', err);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleBlock = (e: React.FormEvent) => {
     e.preventDefault();
     if (!reason.trim()) return;
-
-    setIsSaving(true);
-    try {
-      const lockObj: BlockedPeriod = {
-        day: selectedDay,
-        period: selectedPeriod,
-        reason: reason.trim(),
-        blockedBy: 'Lab Technician',
-        createdAt: new Date().toISOString()
-      };
-      await onSaveLock(selectedDay, selectedPeriod, lockObj);
-    } catch (err) {
-      console.error('Failed to lock period:', err);
-    } finally {
-      setIsSaving(false);
-    }
+    void run(reason.trim(), selectedSlots);
   };
 
-  const handleUnlock = async () => {
-    setIsSaving(true);
-    try {
-      await onSaveLock(selectedDay, selectedPeriod, null);
-      setReason('');
-    } catch (err) {
-      console.error('Failed to unlock period:', err);
-    } finally {
-      setIsSaving(false);
-    }
-  };
-
-  const totalLockedCount = Object.keys(sectionData.blockedPeriods || {}).length;
+  const totalLockedCount = Object.keys(blocked).length;
+  const count = selectedKeys.length;
 
   return (
-    <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs z-50 flex items-center justify-center p-4 overflow-y-auto">
-      <div className="bg-white border border-slate-200 rounded-2xl shadow-2xl max-w-2xl w-full p-6 text-slate-900 my-8">
-        
-        {/* Header */}
+    <div
+      className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs z-50 flex items-center justify-center p-4 overflow-y-auto"
+      onMouseDown={e => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="lock-modal-title"
+        className="bg-white border border-slate-200 rounded-2xl shadow-2xl max-w-2xl w-full p-6 text-slate-900 my-8"
+      >
         <div className="flex justify-between items-start pb-4 border-b border-slate-200">
           <div className="flex items-center gap-3">
-            <div className="p-2.5 bg-rose-600 text-white rounded-xl shadow-xs">
-              <Lock className="w-5 h-5" />
+            <div className="p-2.5 bg-brand-coral-700 text-white rounded-xl shrink-0">
+              <Lock className="w-5 h-5" aria-hidden="true" />
             </div>
             <div>
-              <h2 className="text-lg font-extrabold text-slate-900 flex items-center gap-2">
-                <span>Lab Technician Period Locking & Blocking</span>
+              <h2
+                id="lock-modal-title"
+                className="text-lg font-bold text-slate-900 flex items-center gap-2 flex-wrap"
+              >
+                <span>Block periods</span>
                 {totalLockedCount > 0 && (
-                  <span className="bg-rose-100 text-rose-800 text-xs px-2 py-0.5 rounded-full font-bold">
-                    {totalLockedCount} Locked
+                  <span className="bg-brand-coral-100 text-brand-coral-900 text-xs px-2 py-0.5 rounded-full font-bold">
+                    {totalLockedCount} blocked
                   </span>
                 )}
               </h2>
-              <p className="text-xs text-slate-500 mt-0.5">
-                Lock any period to prevent bookings and leave a reason for teachers (e.g. covering a class, busy with setup).
+              <p className="text-sm text-slate-600 mt-0.5">
+                Pick any number of periods, then give one reason for all of them. Teachers see the
+                reason when they try to book.
               </p>
             </div>
           </div>
 
           <button
+            type="button"
             onClick={onClose}
-            className="text-slate-400 hover:text-slate-700 bg-slate-100 rounded-lg p-1.5 transition cursor-pointer"
+            aria-label="Close period blocking"
+            className="text-slate-600 hover:text-slate-900 bg-slate-100 rounded-lg p-1.5 transition shrink-0"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
-        {/* WEEKLY QUICK SELECTOR MATRIX */}
-        <div className="my-4 bg-slate-50 p-3.5 rounded-xl border border-slate-200 text-xs">
-          <div className="flex justify-between items-center mb-2.5">
-            <span className="font-bold text-slate-800 flex items-center gap-1.5 uppercase tracking-wider text-[11px]">
-              <Calendar className="w-3.5 h-3.5 text-rose-600" />
-              <span>Weekly Timetable Matrix Selector</span>
+        <div className="my-4 bg-slate-50 p-3.5 rounded-xl border border-slate-200">
+          <div className="flex justify-between items-center mb-2.5 gap-2 flex-wrap">
+            <span className="font-bold text-slate-800 flex items-center gap-1.5 uppercase tracking-wide text-xs">
+              <Calendar className="w-3.5 h-3.5 text-brand-coral-600" aria-hidden="true" />
+              <span>Weekly timetable</span>
             </span>
-            <span className="text-[10.5px] text-slate-500">
-              Click a period below to lock or unlock
+            <span className="text-xs text-slate-600">
+              Tap cells, or a day / period heading to take the whole line
             </span>
           </div>
 
-          <div className="grid grid-cols-5 gap-1.5">
-            {DAYS_LIST.map((d) => (
-              <div key={d.id} className="space-y-1">
-                <div className="text-center font-bold text-[10px] uppercase text-slate-600 bg-slate-200/60 py-1 rounded">
-                  {d.label.slice(0, 3)}
-                </div>
-                <div className="space-y-1">
-                  {PERIODS_LIST.map((p) => {
-                    const key = `${d.id}_p${p}`;
-                    const lockObj = sectionData.blockedPeriods?.[key];
-                    const isSelected = selectedDay === d.id && selectedPeriod === p;
-                    const isLocked = Boolean(lockObj);
-
-                    return (
+          <table className="w-full border-separate border-spacing-1">
+            <caption className="sr-only">
+              Select periods to block. Column headings select a whole day; row headings select that
+              period across the week.
+            </caption>
+            <thead>
+              <tr>
+                <th scope="col" className="w-10">
+                  <span className="sr-only">Period</span>
+                </th>
+                {DAYS_LIST.map(d => {
+                  const keys = PERIODS_LIST.map(p => keyOf(d.id, p));
+                  const allOn = keys.every(k => selected.has(k));
+                  return (
+                    <th key={d.id} scope="col">
                       <button
-                        key={p}
                         type="button"
-                        onClick={() => handleSelectSlot(d.id, p)}
-                        className={`w-full py-1 px-1 rounded text-[10px] font-bold flex items-center justify-between transition cursor-pointer border ${
-                          isSelected
-                            ? 'bg-rose-600 text-white border-rose-700 shadow-xs'
-                            : isLocked
-                            ? 'bg-rose-100 text-rose-900 border-rose-300'
-                            : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-100'
+                        onClick={() => toggleGroup(keys)}
+                        aria-pressed={allOn}
+                        title={`Select all of ${d.short}`}
+                        className={`w-full min-h-6 py-1 rounded text-xs font-bold uppercase transition border ${
+                          allOn
+                            ? 'bg-brand-coral-700 text-white border-brand-coral-700'
+                            : 'bg-slate-200 text-slate-700 border-slate-300 hover:bg-slate-300'
                         }`}
-                        title={
-                          isLocked
-                            ? `P${p} Locked: ${lockObj?.reason}`
-                            : `Period ${p}`
-                        }
                       >
-                        <span>P{p}</span>
-                        {isLocked ? (
-                          <Lock className="w-2.5 h-2.5 text-rose-700 shrink-0" />
-                        ) : (
-                          <span className="w-1.5 h-1.5 rounded-full bg-slate-300 shrink-0"></span>
-                        )}
+                        {d.short}
                       </button>
-                    );
-                  })}
-                </div>
-              </div>
-            ))}
+                    </th>
+                  );
+                })}
+              </tr>
+            </thead>
+            <tbody>
+              {PERIODS_LIST.map(p => {
+                const rowKeys = DAYS_LIST.map(d => keyOf(d.id, p));
+                const rowOn = rowKeys.every(k => selected.has(k));
+                return (
+                  <tr key={p}>
+                    <th scope="row">
+                      <button
+                        type="button"
+                        onClick={() => toggleGroup(rowKeys)}
+                        aria-pressed={rowOn}
+                        title={`Select period ${p} on every day`}
+                        className={`w-full min-h-6 py-1 rounded text-xs font-bold transition border ${
+                          rowOn
+                            ? 'bg-brand-coral-700 text-white border-brand-coral-700'
+                            : 'bg-slate-200 text-slate-700 border-slate-300 hover:bg-slate-300'
+                        }`}
+                      >
+                        P{p}
+                      </button>
+                    </th>
+                    {DAYS_LIST.map(d => {
+                      const k = keyOf(d.id, p);
+                      const lock = blocked[k];
+                      const isSelected = selected.has(k);
+                      return (
+                        <td key={d.id}>
+                          <button
+                            type="button"
+                            onClick={() => toggle(d.id, p)}
+                            aria-pressed={isSelected}
+                            aria-label={`${d.short} period ${p}${
+                              lock ? `, blocked: ${lock.reason}` : ', open'
+                            }`}
+                            title={lock ? `Blocked: ${lock.reason}` : 'Open'}
+                            className={`w-full min-h-6 py-1.5 rounded text-xs font-bold flex items-center justify-center gap-1 transition border ${
+                              isSelected
+                                ? 'bg-brand-coral-700 text-white border-brand-coral-800'
+                                : lock
+                                  ? 'bg-brand-coral-100 text-brand-coral-900 border-brand-coral-300'
+                                  : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
+                            }`}
+                          >
+                            {lock ? (
+                              <Lock className="w-3 h-3 shrink-0" aria-hidden="true" />
+                            ) : (
+                              <span
+                                className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                                  isSelected ? 'bg-white/70' : 'bg-slate-300'
+                                }`}
+                                aria-hidden="true"
+                              />
+                            )}
+                          </button>
+                        </td>
+                      );
+                    })}
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+
+          <div className="flex items-center justify-between gap-2 flex-wrap mt-2.5">
+            <p className="text-xs text-slate-700" aria-live="polite">
+              {count === 0 ? (
+                'Nothing selected.'
+              ) : (
+                <>
+                  <strong className="text-slate-900">{count}</strong> period
+                  {count === 1 ? '' : 's'} selected
+                  {lockedInSelection.length > 0 && (
+                    <> · {lockedInSelection.length} already blocked</>
+                  )}
+                </>
+              )}
+            </p>
+            {count > 0 && (
+              <button
+                type="button"
+                onClick={() => setSelected(new Set())}
+                className="text-xs font-semibold text-slate-700 hover:text-slate-900 underline"
+              >
+                Clear selection
+              </button>
+            )}
           </div>
         </div>
 
-        {/* EDITOR FORM FOR SELECTED PERIOD */}
-        <form onSubmit={handleSave} className="space-y-4 pt-2 border-t border-slate-200">
-          
-          <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl flex items-center justify-between text-xs">
-            <div className="flex items-center gap-2">
-              <Clock className="w-4 h-4 text-rose-700 shrink-0" />
-              <div>
-                <span className="text-[10px] text-rose-600 font-bold uppercase tracking-wider block">Selected Period</span>
-                <span className="font-extrabold text-rose-950 text-sm capitalize">
-                  {selectedDay} • Period {selectedPeriod}
-                </span>
-              </div>
-            </div>
-
-            <div className="flex items-center gap-2">
-              <span className={`px-2.5 py-1 rounded-md text-xs font-extrabold flex items-center gap-1 ${
-                existingLock ? 'bg-rose-600 text-white' : 'bg-emerald-600 text-white'
-              }`}>
-                {existingLock ? (
-                  <>
-                    <Lock className="w-3.5 h-3.5" />
-                    <span>LOCKED / BLOCKED</span>
-                  </>
-                ) : (
-                  <>
-                    <Unlock className="w-3.5 h-3.5" />
-                    <span>OPEN / AVAILABLE</span>
-                  </>
-                )}
-              </span>
-            </div>
-          </div>
-
-          {/* Reason Input */}
+        <form onSubmit={handleBlock} className="space-y-4 pt-2 border-t border-slate-200">
           <div className="space-y-2">
-            <label className="block text-xs font-bold text-slate-800 flex items-center gap-1">
-              <AlertOctagon className="w-3.5 h-3.5 text-rose-600" />
-              <span>Reason for Locking Period {selectedPeriod} (Visible to Teachers):</span>
+            <label
+              htmlFor="lock-reason"
+              className="text-sm font-bold text-slate-800 flex items-center gap-1"
+            >
+              <AlertOctagon className="w-3.5 h-3.5 text-brand-coral-600" aria-hidden="true" />
+              <span>Reason (teachers will see this)</span>
             </label>
             <input
+              id="lock-reason"
               type="text"
               value={reason}
-              onChange={(e) => setReason(e.target.value)}
-              placeholder="e.g. Covering class 10B / Busy with optics setup / Lab maintenance"
-              className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-xs font-bold text-slate-900 focus:outline-none focus:bg-white focus:border-rose-600"
-              required={!existingLock}
+              onChange={e => setReason(e.target.value)}
+              placeholder="e.g. Covering class 10B, optics setup, lab maintenance"
+              className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm font-medium text-slate-900 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-brand-coral-500 focus:border-brand-coral-500 focus:bg-white transition"
             />
 
-            {/* Common Presets */}
             <div className="space-y-1.5 pt-1">
-              <span className="text-[10.5px] font-semibold text-slate-500 block">Quick Reasons:</span>
+              <span className="text-xs font-semibold text-slate-700 block">Quick reasons</span>
               <div className="flex flex-wrap gap-1.5">
-                {COMMON_REASONS.map((r, idx) => (
+                {COMMON_REASONS.map(r => (
                   <button
-                    key={idx}
+                    key={r}
                     type="button"
                     onClick={() => setReason(r)}
-                    className="px-2 py-1 rounded-lg bg-slate-100 hover:bg-rose-50 hover:text-rose-900 text-slate-700 border border-slate-200 text-[10.5px] font-medium transition cursor-pointer"
+                    className="px-2.5 py-1.5 rounded-lg bg-slate-100 hover:bg-brand-coral-50 hover:text-brand-coral-900 text-slate-700 border border-slate-300 text-xs font-medium transition"
                   >
-                    "{r}"
+                    {r}
                   </button>
                 ))}
               </div>
             </div>
           </div>
 
-          {/* Form Action Buttons */}
-          <div className="pt-3 border-t border-slate-200 flex items-center justify-between gap-3">
-            {existingLock ? (
+          <div className="pt-3 border-t border-slate-200 flex items-center justify-between gap-3 flex-wrap">
+            {lockedInSelection.length > 0 ? (
               <button
                 type="button"
-                onClick={handleUnlock}
+                onClick={() => void run(null, lockedInSelection.map(parseKey))}
                 disabled={isSaving}
-                className="px-4 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                className="px-4 py-2 bg-brand-green-50 hover:bg-brand-green-100 text-brand-green-900 border border-brand-green-400 rounded-xl text-sm font-bold transition flex items-center gap-1.5 disabled:opacity-50"
               >
-                <Unlock className="w-4 h-4 text-emerald-600" />
-                <span>Unlock Period {selectedPeriod}</span>
+                <Unlock className="w-4 h-4 text-brand-green-700" aria-hidden="true" />
+                <span>
+                  Unblock {lockedInSelection.length} period
+                  {lockedInSelection.length === 1 ? '' : 's'}
+                </span>
               </button>
             ) : (
-              <div></div>
+              <span />
             )}
 
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 ml-auto">
               <button
                 type="button"
                 onClick={onClose}
-                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl text-xs transition cursor-pointer"
+                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-xl text-sm transition"
               >
                 Cancel
               </button>
 
               <button
                 type="submit"
-                disabled={isSaving || !reason.trim()}
-                className="px-5 py-2 bg-rose-600 hover:bg-rose-700 text-white font-extrabold rounded-xl text-xs transition flex items-center gap-1.5 cursor-pointer shadow-xs disabled:opacity-50"
+                disabled={isSaving || !reason.trim() || count === 0}
+                className="px-5 py-2 bg-brand-coral-700 hover:bg-brand-coral-800 text-white font-bold rounded-xl text-sm transition flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                <Lock className="w-4 h-4" />
-                <span>{isSaving ? 'Saving...' : `Lock ${selectedDay.toUpperCase()} Period ${selectedPeriod}`}</span>
+                <Lock className="w-4 h-4" aria-hidden="true" />
+                <span>
+                  {isSaving
+                    ? 'Saving…'
+                    : count === 0
+                      ? 'Select a period'
+                      : unlockedInSelection.length === 0
+                        ? `Update ${count} reason${count === 1 ? '' : 's'}`
+                        : `Block ${count} period${count === 1 ? '' : 's'}`}
+                </span>
               </button>
             </div>
           </div>
-
         </form>
-
       </div>
     </div>
   );
