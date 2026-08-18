@@ -17,6 +17,19 @@ import { SCHOOL_LABEL } from '../brand';
  * validation lists pointed at a `Lists` sheet. Typing is what produces
  * "Chemicals" vs "chemical" vs "Chem", which then cannot be filtered on.
  *
+ * ## Sheet order is load-bearing
+ *
+ * `Materials` MUST be the first worksheet. `Lists` used to be created first,
+ * which put the dropdown source data in position 1 -- and the importer reads
+ * the first sheet. A filled-in template therefore came back as four columns
+ * headed "Labs / Categories / Units / Hazards", mapped to nothing, and every
+ * row was rejected for "missing name, location". The import looked completely
+ * broken while both halves were individually "correct".
+ *
+ * The importer now also picks the sheet by name and lets the user change it,
+ * so this is belt and braces -- but keep `Materials` first regardless.
+ * `npm run verify:template` asserts it.
+ *
  * ## On the `uuid` advisory under exceljs
  *
  * `npm audit` flags uuid@8.3.2 (GHSA-w5hq-g745-h8pq) via exceljs. That
@@ -28,6 +41,12 @@ import { SCHOOL_LABEL } from '../brand';
 
 /** Rows of the sheet that get dropdowns. Excel needs a bounded range. */
 const VALIDATED_ROWS = 500;
+
+/**
+ * The worksheet the importer looks for by name before falling back to guessing.
+ * Keep in step with `PREFERRED_SHEET_NAMES` in utils/materialImport.ts.
+ */
+export const MATERIALS_SHEET_NAME = 'Materials';
 
 /**
  * Builds the workbook. No DOM, so it can be exercised offline -- see
@@ -52,36 +71,8 @@ export async function buildMaterialTemplate(
   wb.creator = 'Science Lab Scheduler';
   wb.created = new Date();
 
-  /* --- Lists: the source ranges the dropdowns point at ------------------ */
-  const lists = wb.addWorksheet('Lists');
-  lists.columns = [
-    { header: 'Labs', key: 'lab', width: 30 },
-    { header: 'Categories', key: 'cat', width: 20 },
-    { header: 'Units', key: 'unit', width: 16 },
-    { header: 'Hazards', key: 'haz', width: 26 }
-  ];
-  const listLength = Math.max(
-    labNames.length,
-    categoryLabels.length,
-    MATERIAL_UNITS.length,
-    MATERIAL_HAZARDS.length
-  );
-  for (let i = 0; i < listLength; i += 1) {
-    lists.addRow({
-      lab: labNames[i] || null,
-      cat: categoryLabels[i] || null,
-      unit: MATERIAL_UNITS[i] || null,
-      haz: MATERIAL_HAZARDS[i] || null
-    });
-  }
-  lists.getRow(1).font = { bold: true };
-  // Present but out of the way -- Excel will not validate against a hidden
-  // sheet's range in every version, so it stays visible rather than risk the
-  // dropdowns silently failing.
-  lists.state = 'visible';
-
-  /* --- Materials: the sheet they actually fill in ----------------------- */
-  const ws = wb.addWorksheet('Materials', {
+  /* --- Materials: the sheet they actually fill in, and sheet 1 ---------- */
+  const ws = wb.addWorksheet(MATERIALS_SHEET_NAME, {
     views: [{ state: 'frozen', ySplit: 1 }]
   });
 
@@ -134,6 +125,34 @@ export async function buildMaterialTemplate(
   [2, 3].forEach(r => {
     ws.getRow(r).font = { italic: true, color: { argb: 'FF7A7A7A' } };
   });
+
+  /* --- Lists: the source ranges the dropdowns point at ------------------ */
+  const lists = wb.addWorksheet('Lists');
+  lists.columns = [
+    { header: 'Labs', key: 'lab', width: 30 },
+    { header: 'Categories', key: 'cat', width: 20 },
+    { header: 'Units', key: 'unit', width: 16 },
+    { header: 'Hazards', key: 'haz', width: 26 }
+  ];
+  const listLength = Math.max(
+    labNames.length,
+    categoryLabels.length,
+    MATERIAL_UNITS.length,
+    MATERIAL_HAZARDS.length
+  );
+  for (let i = 0; i < listLength; i += 1) {
+    lists.addRow({
+      lab: labNames[i] || null,
+      cat: categoryLabels[i] || null,
+      unit: MATERIAL_UNITS[i] || null,
+      haz: MATERIAL_HAZARDS[i] || null
+    });
+  }
+  lists.getRow(1).font = { bold: true };
+  // Present but out of the way -- Excel will not validate against a hidden
+  // sheet's range in every version, so it stays visible rather than risk the
+  // dropdowns silently failing.
+  lists.state = 'visible';
 
   /* --- The dropdowns ---------------------------------------------------- */
   const listRange = (col: string, count: number) =>
@@ -216,6 +235,7 @@ export async function buildMaterialTemplate(
   how.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
   how.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF006166' } };
   [
+    'Fill in the Materials sheet — it is the first tab, and the one the app reads.',
     'Item Name, Lab and Location are required. Every other column may be left blank.',
     'Lab, Category, Unit and Hazard are dropdowns — click the cell and pick from the arrow.',
     'Lab must be one from the list. A row with an unknown lab is skipped on import and reported by row number.',
@@ -225,9 +245,15 @@ export async function buildMaterialTemplate(
     'Code is optional, but if you fill it in, re-importing updates that item instead of creating a duplicate.',
     'Add as many rows as you need. The dropdowns are set up for the first 500 rows.',
     'Delete the two grey example rows on the Materials sheet before importing.',
-    'The Lists sheet feeds the dropdowns — leave it alone.'
+    'Do not rename or reorder the sheets. The Lists sheet feeds the dropdowns — leave it alone.'
   ].forEach(line => how.addRow({ line }));
   how.getColumn(1).alignment = { wrapText: true, vertical: 'top' };
+
+  // Open on the sheet they are meant to fill in rather than on whichever tab
+  // Excel would otherwise land on.
+  wb.views = [
+    { x: 0, y: 0, width: 20000, height: 20000, firstSheet: 0, activeTab: 0, visibility: 'visible' }
+  ];
 
   return wb;
 }

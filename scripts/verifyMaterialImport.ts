@@ -10,7 +10,13 @@
  *
  * Run with `npm run verify:import`.
  */
-import { guessMapping, buildRows, MaterialField } from '../src/utils/materialImport';
+import {
+  guessMapping,
+  buildRows,
+  pickMaterialsSheet,
+  headerRowScore,
+  MaterialField
+} from '../src/utils/materialImport';
 import type { Lab } from '../src/types';
 
 const LABS: Lab[] = [
@@ -114,6 +120,66 @@ const MAP: (MaterialField | null)[] = [
     LABS
   );
   check('blank trailing rows are skipped silently', rows.length === 0 && errors.length === 0, { rows, errors });
+}
+
+console.log('\n=== column claiming order ===');
+{
+  // Regression: both passes used to run per column, so "Item Location" (which
+  // contains "item") claimed `name` before the real name column was reached,
+  // and every row was then rejected for a missing name.
+  const m = guessMapping(['Item Location', 'Item Name', 'Lab']);
+  check(
+    'a loose match does not steal a field another column names exactly',
+    m[0] === 'location' && m[1] === 'name' && m[2] === 'lab',
+    m
+  );
+}
+{
+  const m = guessMapping(['Quantity', 'Min Quantity']);
+  check(
+    '"Min Quantity" is not read as "Quantity"',
+    m[0] === 'quantity' && m[1] === 'minQuantity',
+    m
+  );
+}
+
+console.log('\n=== picking the sheet out of a workbook ===');
+{
+  // The exact shape the app's own template produces. For as long as the
+  // importer read whichever sheet came first, a filled-in template imported as
+  // zero rows and reported "missing name, location" on every line.
+  const sheets = [
+    {
+      name: 'Lists',
+      rows: [
+        ['Labs', 'Categories', 'Units', 'Hazards'],
+        ['Chemistry Lab', 'Chemical', 'piece', 'Toxic']
+      ]
+    },
+    {
+      name: 'Materials',
+      rows: [
+        ['Item Name', 'Code', 'Category', 'Lab', 'Location'],
+        ['Agar', '', '', 'Biology Lab', 'Fridge']
+      ]
+    },
+    { name: 'Labs', rows: [['School', 'Lab name', 'Lab code']] },
+    { name: 'How to fill in', rows: [['How to fill this in']] }
+  ];
+  check('the sheet named Materials wins over sheet 1', pickMaterialsSheet(sheets) === 1, pickMaterialsSheet(sheets));
+}
+{
+  const sheets = [
+    { name: 'Sheet1', rows: [['Notes', 'Colour']] },
+    { name: 'Sheet2', rows: [['Item', 'Lab', 'Where', 'Qty']] }
+  ];
+  check('with no Materials sheet, the best header row wins', pickMaterialsSheet(sheets) === 1, pickMaterialsSheet(sheets));
+}
+{
+  const stock = headerRowScore(['Item Name', 'Lab', 'Location']);
+  const lookup = headerRowScore(['Labs', 'Categories', 'Units', 'Hazards']);
+  check('a stock header row scores above a lookup one', stock > lookup, { stock, lookup });
+  check('an empty workbook reports no sheet', pickMaterialsSheet([]) === -1, pickMaterialsSheet([]));
 }
 
 console.log(

@@ -12,7 +12,7 @@
  */
 import ExcelJS from 'exceljs';
 import { buildMaterialTemplate } from '../src/utils/materialTemplate';
-import { guessMapping } from '../src/utils/materialImport';
+import { guessMapping, buildRows, pickMaterialsSheet } from '../src/utils/materialImport';
 import { MATERIAL_CATEGORIES, MATERIAL_HAZARDS, MATERIAL_UNITS } from '../src/constants';
 import type { Lab } from '../src/types';
 
@@ -43,6 +43,20 @@ async function main() {
   console.log('\n=== structure ===');
   check('workbook has the four sheets',
     ['Lists', 'Materials', 'Labs', 'How to fill in'].every(n => wb.getWorksheet(n)),
+    wb.worksheets.map(w => w.name));
+  // The regression this file exists to stop happening twice: `Lists` was
+  // created first, so the importer -- which reads position 1 -- saw the
+  // dropdown source data and rejected every row of a filled-in template.
+  check('Materials is the FIRST sheet in the workbook',
+    wb.worksheets[0]?.name === 'Materials',
+    wb.worksheets.map(w => w.name));
+  check('the importer picks Materials out of the workbook',
+    pickMaterialsSheet(
+      wb.worksheets.map(w => ({
+        name: w.name,
+        rows: [((w.getRow(1).values as unknown[]) || []).slice(1)]
+      }))
+    ) === 0,
     wb.worksheets.map(w => w.name));
   check('header row is frozen', ws.views?.[0]?.state === 'frozen', ws.views);
   check('two example rows are present', ws.rowCount >= 3, ws.rowCount);
@@ -107,6 +121,25 @@ async function main() {
     JSON.stringify(colValues(3)) === JSON.stringify([...MATERIAL_UNITS]), colValues(3));
   check('hazard list matches constants.ts',
     JSON.stringify(colValues(4)) === JSON.stringify([...MATERIAL_HAZARDS]), colValues(4));
+
+  console.log('\n=== the template round-trips back through the importer ===');
+  {
+    // End to end: build it, read it back the way the browser importer does, and
+    // assert the example rows actually land as materials. This is what silently
+    // returned zero rows before Materials was moved to position 1.
+    const dataRows = [2, 3].map(
+      r => ((ws.getRow(r).values as unknown[]) || []).slice(1)
+    );
+    const parsed = buildRows(dataRows, mapping, LABS);
+    check('both example rows import cleanly',
+      parsed.rows.length === 2 && parsed.errors.length === 0, parsed.errors);
+    check('the first example lands in the right lab',
+      parsed.rows[0]?.labId === LABS[0].id, parsed.rows[0]);
+    check('its quantity and minimum survive as numbers',
+      parsed.rows[0]?.quantity === 12 && parsed.rows[0]?.minQuantity === 3, parsed.rows[0]);
+    check('its expiry normalises to YYYY-MM-DD',
+      parsed.rows[0]?.expiryDate === '2026-08-01', parsed.rows[0]?.expiryDate);
+  }
 
   console.log(
     failures === 0

@@ -92,6 +92,15 @@ enforcement, switch to Google sign-in restricted to the school domain, create an
 `admins/{uid}` document per administrator, and tighten the `isAdmin()` helper
 already stubbed in `firestore.rules`.
 
+## Troubleshooting
+
+**"The stockroom could not be loaded" / the Excel import fails on the last step.**
+Both mean Firestore is refusing the `materials` collection. The two setup steps
+above have not been done on this project: anonymous sign-in is disabled, so the
+client is unauthenticated, and the deployed rules predate the materials feature
+so the collection falls through to the deny-all. Do step 1 then step 2. Nothing
+in the app can work around it — the browser genuinely has no permission.
+
 ## Known limitations
 
 - **Attachments are inlined** into the reservation document as data URIs, so

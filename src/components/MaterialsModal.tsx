@@ -10,7 +10,8 @@ import {
   AlertTriangle,
   MapPin,
   SearchX,
-  Download
+  Download,
+  Lock
 } from 'lucide-react';
 import { Lab, Material, MaterialCategory, Section } from '../types';
 import {
@@ -44,6 +45,17 @@ interface MaterialsModalProps {
   ) => void;
   onDelete: (material: Material) => void;
   onOpenImport: () => void;
+  /**
+   * Only used to label the import button. The gate itself lives in the import
+   * dialog, which asks for the password rather than refusing silently -- a
+   * disabled button with no way to unlock it is a dead end.
+   */
+  isAdminLoggedIn: boolean;
+  /**
+   * Why the list could not be loaded, if it could not be. Distinct from an
+   * empty stockroom, which is what a denied read used to look like.
+   */
+  loadError?: string | null;
 }
 
 const inputClass =
@@ -108,7 +120,9 @@ export const MaterialsModal: React.FC<MaterialsModalProps> = ({
   onClose,
   onSave,
   onDelete,
-  onOpenImport
+  onOpenImport,
+  isAdminLoggedIn,
+  loadError
 }) => {
   const panelRef = useModalA11y(isOpen, onClose);
 
@@ -333,21 +347,25 @@ export const MaterialsModal: React.FC<MaterialsModalProps> = ({
             </span>
           </button>
 
-          {/* An import writes into one school's stock, so it needs a school
-              chosen -- from the picker screen there isn't one yet. */}
+          {/* Always available. An import does need one school chosen, and from
+              the picker screen there isn't one yet -- but the dialog asks,
+              rather than this sitting disabled behind a tooltip telling you to
+              go elsewhere and come back. Same for the admin password. */}
           <button
             type="button"
             onClick={onOpenImport}
-            disabled={!section}
             title={
-              section
+              isAdminLoggedIn
                 ? 'Import a stock list from Excel'
-                : 'Open a school first — an import loads into one school'
+                : 'Import a stock list from Excel — needs the admin password'
             }
             className="inline-flex items-center gap-1.5 px-3 py-2 bg-white hover:bg-slate-100 text-slate-800 border border-slate-300 rounded-lg text-sm font-semibold transition disabled:opacity-50 disabled:cursor-not-allowed"
           >
             <FileSpreadsheet className="w-4 h-4" aria-hidden="true" />
             <span className="hidden sm:inline">Import Excel</span>
+            {!isAdminLoggedIn && (
+              <Lock className="w-3 h-3 text-slate-500" aria-label="Administrator only" />
+            )}
           </button>
 
           <button
@@ -364,7 +382,25 @@ export const MaterialsModal: React.FC<MaterialsModalProps> = ({
 
         {/* --- list ----------------------------------------------------- */}
         <div className="flex-grow overflow-y-auto pt-3 pr-1">
-          {mine.length === 0 ? (
+          {loadError ? (
+            <div
+              role="alert"
+              className="text-center py-14 bg-brand-coral-50 rounded-xl border border-brand-coral-300 p-6"
+            >
+              <AlertTriangle
+                className="w-10 h-10 text-brand-coral-700 mx-auto mb-3"
+                aria-hidden="true"
+              />
+              <h3 className="text-base font-bold text-slate-900">
+                The stockroom could not be loaded
+              </h3>
+              <p className="text-sm text-slate-700 mt-1 max-w-lg mx-auto">{loadError}</p>
+              <p className="text-xs text-slate-600 mt-2 max-w-lg mx-auto">
+                Nothing is missing — this list is not showing what is stored, so do not add or
+                import items until it loads.
+              </p>
+            </div>
+          ) : mine.length === 0 ? (
             <div className="text-center py-14 bg-slate-50 rounded-xl border border-slate-200 p-6">
               <Package className="w-10 h-10 text-slate-400 mx-auto mb-3" aria-hidden="true" />
               <h3 className="text-base font-bold text-slate-900">No materials yet</h3>

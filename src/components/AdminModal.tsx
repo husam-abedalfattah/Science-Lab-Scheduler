@@ -17,9 +17,14 @@ import {
   Shield,
   Paperclip,
   LogOut,
-  AlertTriangle
+  AlertTriangle,
+  Package,
+  Eye,
+  EyeOff,
+  Ban,
+  Boxes
 } from 'lucide-react';
-import { Reservation, Section, SectionData } from '../types';
+import { Day, Reservation, Section, SectionData } from '../types';
 import { DAYS_LIST } from '../data/initialData';
 import { MAX_CONCURRENT_LABS_PER_PERIOD, WEEKLY_SLOT_CAPACITY } from '../constants';
 import { getEffectiveExperimentDetails, NOT_SPECIFIED } from '../utils/experimentUtils';
@@ -46,6 +51,21 @@ interface AdminModalProps {
   onRemoveClass: (index: number) => void;
   onAddLab: (name: string, code: string) => void;
   onRemoveLab: (id: string) => void;
+  /**
+   * Clears period blocks. The lab technician sets them (deliberately not
+   * admin-gated -- see App.tsx), but only an administrator could previously
+   * see the full list, and nobody could clear a stale one without hunting for
+   * the cell on the grid.
+   */
+  onUnblockPeriods: (slots: { day: Day; period: number }[]) => void;
+  /** Opens the stockroom, so the inventory is reachable from here too. */
+  onOpenMaterials: () => void;
+  /**
+   * Switches which school the panel edits, without leaving it. Needed because
+   * the panel is reachable before a timetable has been chosen, and useful
+   * afterwards: one administrator sets up both schools.
+   */
+  onSelectSection: (section: Section) => void;
 }
 
 const inputClass =
@@ -72,7 +92,10 @@ export const AdminModal: React.FC<AdminModalProps> = ({
   onAddClass,
   onRemoveClass,
   onAddLab,
-  onRemoveLab
+  onRemoveLab,
+  onUnblockPeriods,
+  onOpenMaterials,
+  onSelectSection
 }) => {
   const panelRef = useModalA11y(isOpen, onClose);
 
@@ -88,11 +111,27 @@ export const AdminModal: React.FC<AdminModalProps> = ({
   const schoolLabel = SCHOOL_LABEL[section];
 
   const [passwordInput, setPasswordInput] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [authError, setAuthError] = useState('');
   const [activeTab, setActiveTab] = useState<'settings' | 'stats' | 'log'>('settings');
 
   const [logSearchQuery, setLogSearchQuery] = useState('');
   const [selectedTeacherFilter, setSelectedTeacherFilter] = useState('ALL');
+
+  /**
+   * What the statistics and the materials log count.
+   *
+   * Defaults to the live week, and that default is the point. Every figure on
+   * these two tabs used to pool the active week with every archived week, so
+   * "Total bookings", the materials log and the per-teacher tables all kept
+   * reporting sessions that had been cleared or archived weeks earlier. An
+   * administrator who wiped the week still saw hundreds of bookings and a full
+   * materials list, which is the opposite of what the button appeared to do.
+   *
+   * The archive is still reachable -- it is a toggle, not a deletion -- but it
+   * is now something you ask for rather than something you get by surprise.
+   */
+  const [scope, setScope] = useState<'week' | 'all'>('week');
 
   const [deadlineDay, setDeadlineDay] = useState(sectionData.deadlineDay);
   const [deadlineTime, setDeadlineTime] = useState(sectionData.deadlineTime);
@@ -115,6 +154,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
     setDeadlineDay(sectionData.deadlineDay);
     setDeadlineTime(sectionData.deadlineTime);
     setPasswordInput('');
+    setShowPassword(false);
     setAuthError('');
   }, [isOpen, sectionData.deadlineDay, sectionData.deadlineTime]);
 
@@ -153,6 +193,25 @@ export const AdminModal: React.FC<AdminModalProps> = ({
     return [...allCurrentReservations, ...historical];
   }, [allCurrentReservations, sectionData.history]);
 
+  /** Period blocks, in timetable order rather than object-key order. */
+  const blockedList = useMemo(() => {
+    const dayIndex = new Map(DAYS_LIST.map((d, i) => [d.id, i]));
+    return Object.values(sectionData.blockedPeriods || {})
+      .filter(b => b && b.day)
+      .sort(
+        (a, b) =>
+          (dayIndex.get(a.day) ?? 99) - (dayIndex.get(b.day) ?? 99) || a.period - b.period
+      );
+  }, [sectionData.blockedPeriods]);
+
+  /** The set every figure below is computed from. See `scope`. */
+  const scopedReservations =
+    scope === 'week' ? allCurrentReservations : allCombinedReservations;
+
+  const archivedCount = allCombinedReservations.length - allCurrentReservations.length;
+  const scopeLabel =
+    scope === 'week' ? `week ${sectionData.weekNumber}` : 'the active week and every archive';
+
   const stats = useMemo(() => {
     let techSupport = 0;
     let groups = 0;
@@ -161,7 +220,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
     let missingDetails = 0;
     const safetyItemsFreq: Record<string, number> = {};
 
-    allCombinedReservations.forEach(r => {
+    scopedReservations.forEach(r => {
       const exp = getEffectiveExperimentDetails(r);
       if (exp.needsTechSupport) techSupport += 1;
       groups += exp.numberOfGroups;
@@ -174,7 +233,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
     });
 
     return {
-      total: allCombinedReservations.length,
+      total: scopedReservations.length,
       techSupport,
       groups,
       worksheetCopies,
@@ -182,7 +241,48 @@ export const AdminModal: React.FC<AdminModalProps> = ({
       missingDetails,
       safetyItemsFreq
     };
-  }, [allCombinedReservations]);
+  }, [scopedReservations]);
+
+  /**
+   * The distinct material lines this scope's bookings actually ask for.
+   *
+   * Derived from the reservations rather than kept as its own list, which is
+   * the whole point: when the week is cleared or archived, the requirement
+   * disappears with the bookings that created it instead of lingering as a
+   * stale shopping list. This is the *demand* side and has nothing to do with
+   * the stockroom inventory, which is a permanent record and is never wiped by
+   * a week rolling over.
+   *
+   * Teachers type their materials as a free-text block, usually numbered. The
+   * lines are split, stripped of their numbering and de-duplicated
+   * case-insensitively so "1. Beakers 250ml" and "beakers 250ml" are one entry
+   * with two requesters rather than two entries with one each.
+   */
+  const materialsNeeded = useMemo(() => {
+    const items = new Map<
+      string,
+      { label: string; count: number; requests: { teacher: string; when: string }[] }
+    >();
+
+    scopedReservations.forEach(r => {
+      const exp = getEffectiveExperimentDetails(r);
+      if (!exp.materialsNeeded) return;
+
+      exp.materialsNeeded
+        .split(/\r?\n/)
+        .map(line => line.replace(/^\s*(?:\d+[).:-]?|[-*•])\s*/, '').trim())
+        .filter(Boolean)
+        .forEach(label => {
+          const key = label.toLowerCase();
+          const entry = items.get(key) || { label, count: 0, requests: [] };
+          entry.count += 1;
+          entry.requests.push({ teacher: r.teacher, when: `${r.day} P${r.period}` });
+          items.set(key, entry);
+        });
+    });
+
+    return [...items.values()].sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
+  }, [scopedReservations]);
 
   /**
    * Distribution stats for the live week only.
@@ -228,7 +328,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
 
   const filteredLog = useMemo(() => {
     const q = logSearchQuery.trim().toLowerCase();
-    return allCombinedReservations.filter(r => {
+    return scopedReservations.filter(r => {
       if (selectedTeacherFilter !== 'ALL' && r.teacher !== selectedTeacherFilter) return false;
       if (!q) return true;
       const exp = getEffectiveExperimentDetails(r);
@@ -241,7 +341,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
         r.className
       ].some(field => field?.toLowerCase().includes(q));
     });
-  }, [allCombinedReservations, logSearchQuery, selectedTeacherFilter]);
+  }, [scopedReservations, logSearchQuery, selectedTeacherFilter]);
 
   if (!isOpen) return null;
 
@@ -250,6 +350,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
     if (onLogin(passwordInput)) {
       setAuthError('');
       setPasswordInput('');
+      setShowPassword(false);
     } else {
       setAuthError('Incorrect password.');
     }
@@ -282,10 +383,14 @@ export const AdminModal: React.FC<AdminModalProps> = ({
       'Groups',
       'Tech support',
       'Worksheet copies',
-      'Safety equipment'
+      'Safety equipment',
+      // Whether the lab could actually take the session is the column the
+      // technician was reading the sheet for, and it was not in it.
+      'Supervisor review',
+      'Reason given'
     ];
 
-    const rows = allCombinedReservations.map(r => {
+    const rows = scopedReservations.map(r => {
       const labName = sectionData.labs.find(l => l.id === r.labId)?.name || r.labId;
       const exp = getEffectiveExperimentDetails(r);
       return [
@@ -299,7 +404,13 @@ export const AdminModal: React.FC<AdminModalProps> = ({
         exp.numberOfGroups || NOT_SPECIFIED,
         exp.needsTechSupport ? 'Yes' : 'No',
         exp.worksheetCopies,
-        exp.safetyItems.join('; ')
+        exp.safetyItems.join('; '),
+        r.supervisorReview?.status === 'declined'
+          ? 'Cannot prepare'
+          : r.supervisorReview?.status === 'acknowledged'
+            ? 'Reviewed'
+            : 'Not seen yet',
+        r.supervisorReview?.reason || ''
       ]
         .map(csvCell)
         .join(',');
@@ -309,11 +420,14 @@ export const AdminModal: React.FC<AdminModalProps> = ({
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
 
+    // The filename says which scope it holds. A file called
+    // "Lab_Statistics_Boys_School.csv" that sometimes covered one week and
+    // sometimes the whole term was unreadable a month later.
     const link = document.createElement('a');
     link.href = url;
-    link.download = `Lab_Statistics_${schoolLabel.replace(/\s+/g, '_')}_${new Date()
-      .toISOString()
-      .slice(0, 10)}.csv`;
+    link.download =
+      `Lab_${scope === 'week' ? `Week_${sectionData.weekNumber}` : 'All_Weeks'}_` +
+      `${schoolLabel.replace(/\s+/g, '_')}_${new Date().toISOString().slice(0, 10)}.csv`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -355,7 +469,35 @@ export const AdminModal: React.FC<AdminModalProps> = ({
             </div>
           </div>
 
-          <div className="flex items-center gap-2 shrink-0">
+          <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">
+            {/* Which school is being edited, stated and switchable. Every
+                control below writes into it, and getting that wrong is silent
+                -- you would only find out when the wrong school's roster
+                changed. */}
+            {isAdminLoggedIn && (
+              <div
+                role="group"
+                aria-label="School being edited"
+                className="inline-flex rounded-xl border border-slate-300 bg-white p-0.5"
+              >
+                {(['boys', 'girls'] as Section[]).map(sec => (
+                  <button
+                    key={sec}
+                    type="button"
+                    onClick={() => onSelectSection(sec)}
+                    aria-pressed={section === sec}
+                    className={`px-3 py-1.5 rounded-[10px] text-xs font-bold transition ${
+                      section === sec
+                        ? 'bg-brand-kingdom-700 text-white'
+                        : 'text-slate-700 hover:bg-slate-100'
+                    }`}
+                  >
+                    {SCHOOL_LABEL[sec]}
+                  </button>
+                ))}
+              </div>
+            )}
+
             {isAdminLoggedIn && (
               <button
                 type="button"
@@ -389,24 +531,45 @@ export const AdminModal: React.FC<AdminModalProps> = ({
               </p>
             </div>
 
-            <div className="text-left">
+            <div className="text-left relative">
               <label htmlFor="admin-password" className="sr-only">
                 Admin password
               </label>
               <input
                 id="admin-password"
-                type="password"
+                type={showPassword ? 'text' : 'password'}
                 value={passwordInput}
-                onChange={(e) => setPasswordInput(e.target.value)}
+                onChange={(e) => {
+                  setPasswordInput(e.target.value);
+                  if (authError) setAuthError('');
+                }}
                 placeholder="Admin password"
                 required
                 autoComplete="current-password"
-                className={`${inputClass} text-center`}
+                aria-invalid={authError ? true : undefined}
+                aria-describedby={authError ? 'admin-password-error' : undefined}
+                className={`${inputClass} text-center pr-10 ${
+                  authError ? 'border-brand-coral-600' : ''
+                }`}
               />
+              {/* A mistyped password on a shared lab machine is the common case,
+                  not a shoulder-surfing risk. */}
+              <button
+                type="button"
+                onClick={() => setShowPassword(v => !v)}
+                aria-label={showPassword ? 'Hide password' : 'Show password'}
+                className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 text-slate-500 hover:text-slate-900 rounded transition"
+              >
+                {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+              </button>
             </div>
 
             {authError && (
-              <p role="alert" className="text-sm text-brand-coral-700 font-semibold">
+              <p
+                id="admin-password-error"
+                role="alert"
+                className="text-sm text-brand-coral-700 font-semibold"
+              >
                 {authError}
               </p>
             )}
@@ -421,12 +584,28 @@ export const AdminModal: React.FC<AdminModalProps> = ({
         ) : (
           <div className="space-y-5">
             <div role="tablist" aria-label="Admin sections" className="flex border-b border-slate-200 gap-1 overflow-x-auto">
-              {tabs.map(({ id, label, Icon }) => (
+              {tabs.map(({ id, label, Icon }, tabIdx) => (
                 <button
                   key={id}
                   type="button"
                   role="tab"
                   aria-selected={activeTab === id}
+                  // A tablist is one stop in the tab order; the arrow keys move
+                  // between the tabs themselves. Without this every tab was its
+                  // own stop and Tab walked the header instead of reaching the
+                  // panel's controls.
+                  tabIndex={activeTab === id ? 0 : -1}
+                  onKeyDown={e => {
+                    if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+                    e.preventDefault();
+                    const step = e.key === 'ArrowRight' ? 1 : -1;
+                    const next = tabs[(tabIdx + step + tabs.length) % tabs.length];
+                    setActiveTab(next.id);
+                    const el = e.currentTarget.parentElement?.children[
+                      tabs.indexOf(next)
+                    ] as HTMLElement | undefined;
+                    el?.focus();
+                  }}
                   onClick={() => setActiveTab(id)}
                   className={`pb-2.5 px-4 text-sm font-semibold transition flex items-center gap-2 border-b-2 whitespace-nowrap ${
                     activeTab === id
@@ -689,6 +868,90 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                   </button>
                 </div>
 
+                {/* Period blocks. The technician sets these on the grid; until
+                    now there was nowhere to see them all, so a block left on
+                    from a maintenance day silently kept a period unbookable
+                    with nobody remembering it was there. */}
+                <div className="bg-slate-50 p-4 rounded-xl border border-slate-300 space-y-3">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <div className="flex items-center gap-2 text-slate-900 font-bold text-sm">
+                      <Ban className="w-4 h-4 text-brand-coral-700" aria-hidden="true" />
+                      <span>Blocked periods ({blockedList.length})</span>
+                    </div>
+                    {blockedList.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          onUnblockPeriods(
+                            blockedList.map(b => ({ day: b.day, period: b.period }))
+                          )
+                        }
+                        className="px-3 py-1.5 bg-white hover:bg-slate-100 text-slate-800 border border-slate-300 rounded-lg text-xs font-semibold transition"
+                      >
+                        Unblock all
+                      </button>
+                    )}
+                  </div>
+
+                  {blockedList.length === 0 ? (
+                    <p className="text-sm text-slate-600">
+                      No periods are blocked. The lab technician blocks them from the schedule
+                      grid when the lab cannot be serviced.
+                    </p>
+                  ) : (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-40 overflow-y-auto pr-1">
+                      {blockedList.map(b => (
+                        <div
+                          key={`${b.day}_p${b.period}`}
+                          className="bg-white border border-slate-300 rounded-lg p-2 flex items-start justify-between gap-2"
+                        >
+                          <div className="min-w-0">
+                            <p className="text-sm font-semibold text-slate-900 capitalize">
+                              {b.day} · P{b.period}
+                            </p>
+                            <p className="text-xs text-slate-600 break-words">{b.reason}</p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => onUnblockPeriods([{ day: b.day, period: b.period }])}
+                            aria-label={`Unblock ${b.day} period ${b.period}`}
+                            title="Unblock this period"
+                            className="text-slate-500 hover:text-brand-coral-700 p-1 rounded transition shrink-0"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* The stockroom is open to everyone, but an administrator
+                    arriving here to set the week up should not have to go back
+                    out to the header to reach it -- and the Excel import now
+                    asks for this password anyway. */}
+                <div className="bg-slate-50 p-4 rounded-xl border border-slate-300 flex items-center justify-between gap-4 flex-wrap">
+                  <div className="flex items-center gap-3 min-w-0">
+                    <div className="p-2 rounded-lg bg-brand-kingdom-700 text-white shrink-0">
+                      <Boxes className="w-5 h-5" aria-hidden="true" />
+                    </div>
+                    <div className="min-w-0">
+                      <h4 className="text-sm font-bold text-slate-900">Stockroom inventory</h4>
+                      <p className="text-sm text-slate-700 mt-0.5">
+                        Permanent record of what the labs hold, and the Excel import. Not touched
+                        by clearing or archiving a week.
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={onOpenMaterials}
+                    className="px-4 py-2 bg-brand-kingdom-600 hover:bg-brand-kingdom-700 text-white text-sm font-bold rounded-lg transition shrink-0"
+                  >
+                    Open stockroom
+                  </button>
+                </div>
+
                 {/* Labs */}
                 <div className="bg-slate-50 p-4 rounded-xl border border-slate-300 space-y-3">
                   <div className="flex items-center justify-between gap-2 flex-wrap">
@@ -821,24 +1084,37 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                       <span>Usage statistics</span>
                     </h3>
                     <p className="text-sm text-slate-700 mt-0.5">
-                      Active week plus every archived week for {schoolLabel}.
+                      Counting {scopeLabel} for {schoolLabel}.
                     </p>
                   </div>
 
-                  <button
-                    type="button"
-                    onClick={handleExportCsv}
-                    className="px-3.5 py-2 bg-brand-kingdom-600 hover:bg-brand-kingdom-700 text-white font-semibold text-sm rounded-xl flex items-center gap-1.5 transition shrink-0"
-                  >
-                    <FileText className="w-4 h-4" aria-hidden="true" />
-                    <span>Export CSV</span>
-                  </button>
+                  <div className="flex items-center gap-2 shrink-0 flex-wrap">
+                    <ScopeToggle
+                      scope={scope}
+                      onChange={setScope}
+                      weekNumber={sectionData.weekNumber}
+                      archivedCount={archivedCount}
+                    />
+                    <button
+                      type="button"
+                      onClick={handleExportCsv}
+                      className="px-3.5 py-2 bg-brand-kingdom-600 hover:bg-brand-kingdom-700 text-white font-semibold text-sm rounded-xl flex items-center gap-1.5 transition shrink-0"
+                    >
+                      <FileText className="w-4 h-4" aria-hidden="true" />
+                      <span>Export CSV</span>
+                    </button>
+                  </div>
                 </div>
 
                 <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-                  <StatCard label="Total bookings" value={stats.total} tone="kingdom" hint="Active and archived" />
+                  <StatCard
+                    label="Total bookings"
+                    value={stats.total}
+                    tone="kingdom"
+                    hint={scope === 'week' ? `Week ${sectionData.weekNumber} only` : 'Active and archived'}
+                  />
                   <StatCard label="Tech support requested" value={stats.techSupport} tone="aqua" hint="Technician attendance" />
-                  <StatCard label="Student groups" value={stats.groups} tone="green" hint="Across all sessions" />
+                  <StatCard label="Student groups" value={stats.groups} tone="green" hint="Across these sessions" />
                   <StatCard label="Worksheet copies" value={stats.worksheetCopies} tone="yellow" hint="Printing requested" />
                   <StatCard label="Attachments" value={stats.uploadedFiles} tone="aqua" hint="Files uploaded" />
                   {/* Replaces a card that duplicated "Total bookings" exactly. */}
@@ -917,7 +1193,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
 
                   <div className="space-y-4 max-h-[50vh] overflow-y-auto pr-1">
                     {sectionData.teachers.map(tName => {
-                      const teacherResList = allCombinedReservations.filter(r => r.teacher === tName);
+                      const teacherResList = scopedReservations.filter(r => r.teacher === tName);
 
                       if (teacherResList.length === 0) {
                         return (
@@ -1024,6 +1300,76 @@ export const AdminModal: React.FC<AdminModalProps> = ({
             {/* LOG */}
             {activeTab === 'log' && (
               <div className="space-y-4">
+                <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 bg-brand-kingdom-50/70 p-3.5 rounded-xl border border-brand-kingdom-300">
+                  <div>
+                    <h3 className="text-sm font-bold text-brand-kingdom-950 flex items-center gap-2">
+                      <FlaskConical className="w-4 h-4 text-brand-kingdom-700" aria-hidden="true" />
+                      <span>Materials log</span>
+                    </h3>
+                    <p className="text-sm text-slate-700 mt-0.5">
+                      What the bookings in {scopeLabel} ask the lab to prepare.
+                    </p>
+                  </div>
+                  <ScopeToggle
+                    scope={scope}
+                    onChange={setScope}
+                    weekNumber={sectionData.weekNumber}
+                    archivedCount={archivedCount}
+                  />
+                </div>
+
+                {/* Demand, aggregated. Derived from the bookings themselves, so
+                    clearing or archiving the week takes the list with it --
+                    unlike the stockroom inventory, which is permanent. */}
+                <div className="bg-slate-50 p-4 rounded-xl border border-slate-300 space-y-3">
+                  <div className="flex items-baseline justify-between gap-2 flex-wrap">
+                    <h4 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                      <Package className="w-4 h-4 text-brand-kingdom-700" aria-hidden="true" />
+                      <span>
+                        {scope === 'week'
+                          ? `Needed in week ${sectionData.weekNumber}`
+                          : 'Needed across all weeks'}
+                      </span>
+                    </h4>
+                    <span className="text-xs text-slate-700">
+                      {materialsNeeded.length} distinct item
+                      {materialsNeeded.length === 1 ? '' : 's'} from {stats.total} booking
+                      {stats.total === 1 ? '' : 's'}
+                    </span>
+                  </div>
+
+                  {materialsNeeded.length === 0 ? (
+                    <p className="text-sm text-slate-600">
+                      {stats.total === 0
+                        ? scope === 'week'
+                          ? `Nothing is booked in week ${sectionData.weekNumber}, so nothing is needed.`
+                          : 'No bookings to draw a materials list from.'
+                        : 'None of these bookings list any materials.'}
+                    </p>
+                  ) : (
+                    <ul className="grid grid-cols-1 md:grid-cols-2 gap-2 max-h-64 overflow-y-auto pr-1">
+                      {materialsNeeded.map(item => (
+                        <li
+                          key={item.label.toLowerCase()}
+                          className="bg-white border border-slate-300 rounded-lg px-3 py-2 flex items-start justify-between gap-2"
+                        >
+                          <span className="text-sm text-slate-900 min-w-0 break-words">
+                            {item.label}
+                          </span>
+                          <span
+                            className="px-2 py-0.5 bg-brand-kingdom-100 text-brand-kingdom-900 rounded-full text-xs font-bold shrink-0 tabular-nums"
+                            title={item.requests
+                              .map(rq => `${rq.teacher} — ${rq.when}`)
+                              .join('\n')}
+                          >
+                            ×{item.count}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+
                 <div className="flex flex-col sm:flex-row gap-3 items-stretch sm:items-center justify-between">
                   <div className="relative w-full sm:w-2/3">
                     <label htmlFor="log-search" className="sr-only">
@@ -1187,6 +1533,55 @@ const TONES = {
   yellow: 'bg-brand-yellow-50 border-brand-yellow-300 text-brand-yellow-900',
   coral: 'bg-brand-coral-50 border-brand-coral-300 text-brand-coral-900'
 } as const;
+
+/**
+ * Week / all-weeks switch for the statistics and the materials log.
+ *
+ * A segmented control rather than a checkbox because the two states are equally
+ * legitimate readings and the label has to state which one is live -- the old
+ * behaviour was "all weeks, silently", and nothing on screen said so.
+ */
+const ScopeToggle: React.FC<{
+  scope: 'week' | 'all';
+  onChange: (s: 'week' | 'all') => void;
+  weekNumber: number;
+  archivedCount: number;
+}> = ({ scope, onChange, weekNumber, archivedCount }) => (
+  <div
+    role="group"
+    aria-label="What these figures count"
+    className="inline-flex rounded-xl border border-slate-300 bg-white p-0.5 shrink-0"
+  >
+    {(
+      [
+        { id: 'week' as const, label: `Week ${weekNumber}`, title: 'This week only' },
+        {
+          id: 'all' as const,
+          label: 'All weeks',
+          title:
+            archivedCount > 0
+              ? `Includes ${archivedCount} archived booking${archivedCount === 1 ? '' : 's'}`
+              : 'Nothing archived yet'
+        }
+      ]
+    ).map(opt => (
+      <button
+        key={opt.id}
+        type="button"
+        onClick={() => onChange(opt.id)}
+        aria-pressed={scope === opt.id}
+        title={opt.title}
+        className={`px-3 py-1.5 rounded-[10px] text-xs font-bold transition ${
+          scope === opt.id
+            ? 'bg-brand-kingdom-700 text-white'
+            : 'text-slate-700 hover:bg-slate-100'
+        }`}
+      >
+        {opt.label}
+      </button>
+    ))}
+  </div>
+);
 
 /** Compact figure inside a grouped panel. */
 const MiniStat: React.FC<{

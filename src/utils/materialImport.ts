@@ -70,29 +70,108 @@ const ALIASES: Record<MaterialField, string[]> = {
 
 const norm = (v: unknown) => String(v ?? '').trim().toLowerCase().replace(/[\s_-]+/g, ' ');
 
-/** Best-guess header → field mapping. Returns one entry per spreadsheet column. */
+const FIELD_ORDER = Object.keys(ALIASES) as MaterialField[];
+
+/**
+ * Best-guess header → field mapping. Returns one entry per spreadsheet column.
+ *
+ * Two full passes, not one pass per column. Exact matches are claimed across
+ * every column *first*, and only then are the leftovers matched on substring.
+ * Doing both per column let an earlier column's loose match steal a field an
+ * later column named exactly: a sheet headed "Item Location | Item Name" gave
+ * `name` to the location column (it contains "item"), leaving the real name
+ * column unmapped and every row rejected for a missing name.
+ */
 export function guessMapping(headers: unknown[]): (MaterialField | null)[] {
+  const out: (MaterialField | null)[] = headers.map(() => null);
   const taken = new Set<MaterialField>();
-  return headers.map(h => {
-    const key = norm(h);
-    if (!key) return null;
-    for (const [field, names] of Object.entries(ALIASES) as [MaterialField, string[]][]) {
+  const keys = headers.map(norm);
+
+  // Pass 1 — exact alias hits.
+  keys.forEach((key, i) => {
+    if (!key) return;
+    for (const field of FIELD_ORDER) {
       if (taken.has(field)) continue;
-      if (names.includes(key)) {
+      if (ALIASES[field].includes(key)) {
         taken.add(field);
-        return field;
+        out[i] = field;
+        return;
       }
     }
-    // Second pass: substring, so "Item Name (English)" still lands on `name`.
-    for (const [field, names] of Object.entries(ALIASES) as [MaterialField, string[]][]) {
-      if (taken.has(field)) continue;
-      if (names.some(n => key.includes(n))) {
-        taken.add(field);
-        return field;
-      }
-    }
-    return null;
   });
+
+  // Pass 2 — substring, so "Item Name (English)" still lands on `name`. The
+  // longest alias wins, so "min quantity" is not read as "quantity".
+  keys.forEach((key, i) => {
+    if (!key || out[i]) return;
+    let best: { field: MaterialField; len: number } | null = null;
+    for (const field of FIELD_ORDER) {
+      if (taken.has(field)) continue;
+      for (const alias of ALIASES[field]) {
+        if (key.includes(alias) && (!best || alias.length > best.len)) {
+          best = { field, len: alias.length };
+        }
+      }
+    }
+    if (best) {
+      taken.add(best.field);
+      out[i] = best.field;
+    }
+  });
+
+  return out;
+}
+
+/**
+ * How well a header row looks like a materials sheet, 0–1.
+ *
+ * Used to pick the right worksheet out of a workbook when none is named
+ * "Materials". A stock list has a name, a lab and a location column; the
+ * template's own `Lists` / `Labs` / `How to fill in` tabs do not.
+ */
+export function headerRowScore(headers: unknown[]): number {
+  const mapping = guessMapping(headers);
+  const required = MATERIAL_FIELDS.filter(f => f.required).map(f => f.id);
+  const hits = required.filter(f => mapping.includes(f)).length;
+  const extras = mapping.filter(m => m !== null && !required.includes(m)).length;
+  // Required columns dominate; the optional ones only break ties.
+  return hits / required.length + Math.min(extras, 9) / 100;
+}
+
+/** Sheet names taken as the materials sheet without looking at the headings. */
+export const PREFERRED_SHEET_NAMES = ['materials', 'material', 'stock', 'inventory', 'المواد'];
+
+export interface SheetCandidate {
+  name: string;
+  rows: unknown[][];
+}
+
+/**
+ * Picks the worksheet to import out of a workbook.
+ *
+ * Never blindly "the first sheet". The app's own template carries four tabs,
+ * and reading position 1 rather than the sheet called "Materials" is what made
+ * a filled-in template import as zero valid rows.
+ */
+export function pickMaterialsSheet(sheets: SheetCandidate[]): number {
+  if (sheets.length === 0) return -1;
+
+  const byName = sheets.findIndex(s =>
+    PREFERRED_SHEET_NAMES.includes(norm(s.name))
+  );
+  if (byName !== -1) return byName;
+
+  let bestIndex = 0;
+  let bestScore = -1;
+  sheets.forEach((s, i) => {
+    if (!s.rows.length) return;
+    const score = headerRowScore(s.rows[0]);
+    if (score > bestScore) {
+      bestScore = score;
+      bestIndex = i;
+    }
+  });
+  return bestIndex;
 }
 
 const CATEGORY_IDS = MATERIAL_CATEGORIES.map(c => c.id) as readonly string[];
