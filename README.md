@@ -74,14 +74,33 @@ The app signs in anonymously on boot (`src/firebase.ts`). If this is not
 enabled, sign-in fails and the app continues unauthenticated, which still works
 against permissive rules — so enabling it first cannot take the app down.
 
+The order matters. Doing step 2 first takes the app down: the rules require a
+signed-in user for *reads* too, and without anonymous auth there is no signed-in
+user, so the schedule stops loading for everyone.
+
 **2. Deploy the Firestore rules**
 
+The Firebase CLI is not a dependency of this project — install it first:
+
 ```bash
+npm install -g firebase-tools     # or: npx firebase-tools <command>
+firebase login
 firebase deploy --only firestore:rules
 ```
 
+`firebase.json` and `.firebaserc` in the repo root point the CLI at this project
+and, critically, at the right database. **This project does not use the
+`(default)` Firestore database** — it uses a named one
+(`ai-studio-sciencelabreserv-…`, see `firebase-applet-config.json`). A deploy
+that omits the `database` key reports success and changes nothing, because it
+writes to `(default)`, which the app never reads.
+
+Check the deploy landed: the CLI prints the database name, and the app's
+stockroom should populate on reload instead of showing "The stockroom could not
+be loaded".
+
 `firestore.rules` requires a signed-in user, validates every reservation's
-shape, caps inline attachment size and denies everything outside the two known
+shape, caps inline attachment size and denies everything outside the three known
 collections.
 
 **What this does and does not give you.** Anonymous auth stops drive-by writes
@@ -95,11 +114,21 @@ already stubbed in `firestore.rules`.
 ## Troubleshooting
 
 **"The stockroom could not be loaded" / the Excel import fails on the last step.**
-Both mean Firestore is refusing the `materials` collection. The two setup steps
-above have not been done on this project: anonymous sign-in is disabled, so the
-client is unauthenticated, and the deployed rules predate the materials feature
-so the collection falls through to the deny-all. Do step 1 then step 2. Nothing
-in the app can work around it — the browser genuinely has no permission.
+
+Firestore is refusing the `materials` collection — reads *and* writes. Both
+setup steps above are outstanding on this project, and both are needed:
+
+- Anonymous sign-in is disabled, so the client has no identity at all
+  (`auth/admin-restricted-operation` in the console on boot).
+- The *deployed* rules predate the materials feature, so `materials` matches no
+  rule and falls through to the deny-all at the bottom of the file. The
+  `sections` collection still writes fine, which is why only the stockroom
+  looks broken.
+
+Enabling anonymous auth alone will not fix it, because the deployed rules do
+not know the collection exists. Do step 1, then step 2. Nothing in the app can
+work around this — the browser genuinely has no permission, and the stockroom
+now says so rather than rendering an empty list.
 
 ## Known limitations
 

@@ -1,0 +1,8 @@
+{
+  "firestore": [
+    {
+      "database": "ai-studio-sciencelabreserv-378c71a8-1348-498f-8e18-e2fc03732ed5",
+      "rules": "firestore.rules"
+    }
+  ]
+}

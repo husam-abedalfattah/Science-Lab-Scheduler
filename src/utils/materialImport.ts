@@ -100,7 +100,7 @@ export function guessMapping(headers: unknown[]): (MaterialField | null)[] {
     }
   });
 
-  // Pass 2 — substring, so "Item Name (English)" still lands on `name`. The
+  // Pass 2 — whole-word, so "Item Name (English)" still lands on `name`. The
   // longest alias wins, so "min quantity" is not read as "quantity".
   keys.forEach((key, i) => {
     if (!key || out[i]) return;
@@ -108,7 +108,7 @@ export function guessMapping(headers: unknown[]): (MaterialField | null)[] {
     for (const field of FIELD_ORDER) {
       if (taken.has(field)) continue;
       for (const alias of ALIASES[field]) {
-        if (key.includes(alias) && (!best || alias.length > best.len)) {
+        if (aliasAppearsIn(key, alias) && (!best || alias.length > best.len)) {
           best = { field, len: alias.length };
         }
       }
@@ -120,6 +120,24 @@ export function guessMapping(headers: unknown[]): (MaterialField | null)[] {
   });
 
   return out;
+}
+
+/**
+ * Does `alias` appear in `key` as a word, rather than as any old substring?
+ *
+ * A plain `includes` read "Cabinet Label" as the *lab* column, because "label"
+ * contains "lab" -- so an inventory sheet's shelf label was taken for the room
+ * the item lives in. Word boundaries stop that while still matching the cases
+ * substring search exists for, like "Item Name (English)".
+ *
+ * `\b` is ASCII-only, so the Arabic aliases fall back to a plain containment
+ * test; Arabic has no casing and these headings are short, so the boundary
+ * problem does not arise there.
+ */
+function aliasAppearsIn(key: string, alias: string): boolean {
+  if (!/^[\x20-\x7e]+$/.test(alias)) return key.includes(alias);
+  const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`\\b${escaped}\\b`).test(key);
 }
 
 /**
@@ -141,9 +159,46 @@ export function headerRowScore(headers: unknown[]): number {
 /** Sheet names taken as the materials sheet without looking at the headings. */
 export const PREFERRED_SHEET_NAMES = ['materials', 'material', 'stock', 'inventory', 'المواد'];
 
+/** How far down a sheet to look for the heading row. */
+const MAX_HEADER_SCAN = 10;
+
 export interface SheetCandidate {
   name: string;
   rows: unknown[][];
+}
+
+/**
+ * Which row holds the column headings.
+ *
+ * Real inventory sheets open with a merged title banner -- "Chemistry Lab
+ * Equipment" across A1 with the rest of the row empty -- and put the actual
+ * headings on row 2 or 3. Assuming row 1 made every such file import as zero
+ * rows: the title became the only "column", nothing mapped, and every data row
+ * was rejected for a missing name.
+ *
+ * Scored rather than pattern-matched, so it works on a sheet that genuinely
+ * does start at row 1 (the score peaks there and nothing is skipped).
+ */
+export function detectHeaderRow(rows: unknown[][]): number {
+  let bestIndex = 0;
+  let bestScore = -1;
+
+  const limit = Math.min(rows.length, MAX_HEADER_SCAN);
+  for (let i = 0; i < limit; i += 1) {
+    const row = rows[i] || [];
+    const filled = row.filter(c => c !== null && c !== undefined && String(c).trim() !== '').length;
+    // A one-cell row is a banner, not a heading row.
+    if (filled < 2) continue;
+
+    const score = headerRowScore(row);
+    // Strictly greater, so the first row that achieves the best score wins and
+    // a repeated heading further down does not steal it.
+    if (score > bestScore) {
+      bestScore = score;
+      bestIndex = i;
+    }
+  }
+  return bestIndex;
 }
 
 /**
@@ -165,13 +220,35 @@ export function pickMaterialsSheet(sheets: SheetCandidate[]): number {
   let bestScore = -1;
   sheets.forEach((s, i) => {
     if (!s.rows.length) return;
-    const score = headerRowScore(s.rows[0]);
+    // Scored on its own heading row, not on row 1 -- otherwise every sheet in a
+    // workbook with title banners scores identically at zero.
+    const score = headerRowScore(s.rows[detectHeaderRow(s.rows)] || []);
     if (score > bestScore) {
       bestScore = score;
       bestIndex = i;
     }
   });
   return bestIndex;
+}
+
+/**
+ * Values to fall back on when a row does not carry its own.
+ *
+ * Two real gaps this closes, both from the same sheet:
+ *
+ * - **No lab column at all.** An inventory workbook usually keeps one sheet per
+ *   room -- "Chemistry", "Physics" -- so the lab is the tab name, and no cell
+ *   in the sheet names it.
+ * - **An empty location column.** A school that has not yet recorded where
+ *   things live still has a list worth importing; refusing all of it because a
+ *   column is blank helps nobody.
+ *
+ * Supplied by the user in the import dialog, never guessed. A default only
+ * fills a blank -- a row that names its own lab or location always wins.
+ */
+export interface RowDefaults {
+  labId?: string;
+  location?: string;
 }
 
 const CATEGORY_IDS = MATERIAL_CATEGORIES.map(c => c.id) as readonly string[];
@@ -241,11 +318,24 @@ export interface ParseResult {
 export function buildRows(
   dataRows: unknown[][],
   mapping: (MaterialField | null)[],
-  labs: Lab[]
+  labs: Lab[],
+  options: {
+    defaults?: RowDefaults;
+    /**
+     * Sheet line number of the first data row, so a rejection points at the
+     * line the user can actually see. Defaults to 2 (header on line 1).
+     */
+    firstDataRow?: number;
+  } = {}
 ): ParseResult {
   const rows: ParsedRow[] = [];
   const errors: RowError[] = [];
   const unknownLabs = new Set<string>();
+
+  const defaults = options.defaults || {};
+  const firstDataRow = options.firstDataRow ?? 2;
+  const defaultLocation = (defaults.location || '').trim();
+  const defaultLab = defaults.labId ? labs.find(l => l.id === defaults.labId) : undefined;
 
   const labByName = new Map<string, Lab>();
   labs.forEach(l => {
@@ -262,24 +352,44 @@ export function buildRows(
     return i === -1 ? undefined : r[i];
   };
 
+  /**
+   * A row is filler when every column that maps to a field is empty.
+   *
+   * Judged on the mapped columns only, not the whole row. Inventory sheets are
+   * pre-numbered hundreds of lines deep, so the tail carries a running "#" and
+   * nothing else. Testing the whole row made each of those a rejection, and one
+   * import reported 73 errors that were all just blank numbered lines --
+   * burying the handful of rows with a real problem.
+   */
+  const mappedIndexes = mapping
+    .map((m, i) => (m ? i : -1))
+    .filter(i => i !== -1);
+
   dataRows.forEach((r, idx) => {
-    const sheetRow = idx + 2; // +1 for zero-index, +1 for the header row
-    if (r.every(c => c === null || c === undefined || String(c).trim() === '')) return;
+    const sheetRow = idx + firstDataRow;
+    const isBlank = mappedIndexes.length
+      ? mappedIndexes.every(i => r[i] === null || r[i] === undefined || String(r[i]).trim() === '')
+      : r.every(c => c === null || c === undefined || String(c).trim() === '');
+    if (isBlank) return;
 
     const name = col(r, 'name');
-    const location = col(r, 'location');
+    const location = col(r, 'location') || defaultLocation;
     const labRaw = col(r, 'lab');
+
+    // Only the name is truly per-row. Lab and location can come from the
+    // sheet-wide defaults the user set, so they are checked after the fallback
+    // has been applied rather than before it.
+    const lab = labRaw ? labByName.get(norm(labRaw)) : defaultLab;
 
     const missing: string[] = [];
     if (!name) missing.push('name');
-    if (!labRaw) missing.push('lab');
+    if (!labRaw && !defaultLab) missing.push('lab');
     if (!location) missing.push('location');
     if (missing.length) {
       errors.push({ row: sheetRow, message: `missing ${missing.join(', ')}` });
       return;
     }
 
-    const lab = labByName.get(norm(labRaw));
     if (!lab) {
       unknownLabs.add(labRaw);
       errors.push({ row: sheetRow, message: `no lab called “${labRaw}” in this school` });

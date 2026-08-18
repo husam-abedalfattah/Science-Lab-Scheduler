@@ -15,6 +15,7 @@ import {
   buildRows,
   pickMaterialsSheet,
   headerRowScore,
+  detectHeaderRow,
   MaterialField
 } from '../src/utils/materialImport';
 import type { Lab } from '../src/types';
@@ -180,6 +181,68 @@ console.log('\n=== picking the sheet out of a workbook ===');
   const lookup = headerRowScore(['Labs', 'Categories', 'Units', 'Hazards']);
   check('a stock header row scores above a lookup one', stock > lookup, { stock, lookup });
   check('an empty workbook reports no sheet', pickMaterialsSheet([]) === -1, pickMaterialsSheet([]));
+}
+
+console.log('\n=== real inventory sheets ===');
+{
+  // The shape of the school's actual stock file: a merged title banner on line
+  // 1, headings on line 2, one sheet per room (so no lab column at all), an
+  // empty location column, and a pre-numbered tail of blank rows.
+  const rows: unknown[][] = [
+    ['Chemistry Lab Equipment', null, null, null, null, null],
+    ['#', 'Equipment / Item', 'Category', 'Quantity', 'Location / Cabinet', 'Notes'],
+    [1, 'Pipette Pump (Green) 10ml', 'Glassware & Containers', 2, null, null],
+    [2, 'Beakers 2000ml', 'Glassware & Containers', 4, null, 'chipped'],
+    [3, null, null, null, null, null],
+    [4, null, null, null, null, null]
+  ];
+
+  const hi = detectHeaderRow(rows);
+  check('the title banner is skipped and line 2 is the heading row', hi === 1, hi);
+
+  const head = rows[hi];
+  const mapping = guessMapping(head);
+  check('"Equipment / Item" -> name', mapping[1] === 'name', mapping);
+  check('"Location / Cabinet" -> location', mapping[4] === 'location', mapping);
+
+  const res = buildRows(rows.slice(hi + 1), mapping, LABS, {
+    defaults: { labId: 'lab-1', location: 'Not recorded yet' },
+    firstDataRow: hi + 2
+  });
+  check('rows import using the sheet-wide lab default',
+    res.rows.length === 2 && res.rows.every(r => r.labId === 'lab-1'), res.rows);
+  check('the blank location falls back to the supplied default',
+    res.rows[0]?.location === 'Not recorded yet', res.rows[0]);
+  check('pre-numbered blank rows are skipped silently, not reported',
+    res.errors.length === 0, res.errors);
+  check('line numbers account for the banner above the headings',
+    // The first data row is sheet line 3, not line 2.
+    buildRows([[9, null, null, null, null, null], [10, null, 'x', null, null, null]], mapping, LABS,
+      { firstDataRow: hi + 2 }).errors[0]?.row === 4,
+    buildRows([[9, null, null, null, null, null], [10, null, 'x', null, null, null]], mapping, LABS,
+      { firstDataRow: hi + 2 }).errors);
+}
+{
+  // "Cabinet Label" contains the letters "lab", and a plain substring match
+  // read it as the lab column -- filing a shelf label as the room.
+  const m = guessMapping(['Equipment / Item', 'Location / Cabinet', 'Cabinet Label']);
+  check('"Cabinet Label" is not mistaken for the lab column',
+    m[2] !== 'lab', m);
+  check('"Location / Cabinet" still wins location', m[1] === 'location', m);
+}
+{
+  const m = guessMapping(['البند', 'المختبر', 'الموقع']);
+  check('Arabic headings still match without word boundaries',
+    m[1] === 'lab' && m[2] === 'location', m);
+}
+{
+  // A row that carries its own values must beat the defaults.
+  const mapping: (MaterialField | null)[] = ['name', 'lab', 'location'];
+  const { rows } = buildRows([['Agar', 'Biology Lab', 'Fridge']], mapping, LABS, {
+    defaults: { labId: 'lab-1', location: 'Not recorded yet' }
+  });
+  check('a row with its own lab and location overrides the defaults',
+    rows[0]?.labId === 'lab-2' && rows[0]?.location === 'Fridge', rows[0]);
 }
 
 console.log(
