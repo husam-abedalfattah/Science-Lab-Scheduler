@@ -376,15 +376,65 @@ export function subscribeToMaterials(
   };
 }
 
+/**
+ * Fields a material may legitimately not have.
+ *
+ * They are the ones the edit form can be cleared back to blank, which is why
+ * they need `deleteField()` rather than omission -- see below. The required
+ * four (`section`, `name`, `labId`, `location`) are deliberately absent:
+ * firestore.rules rejects a material without them, and the form will not
+ * submit one.
+ */
+const CLEARABLE_MATERIAL_FIELDS = [
+  'code',
+  'category',
+  'quantity',
+  'unit',
+  'minQuantity',
+  'hazard',
+  'expiryDate',
+  'supplier',
+  'notes'
+] as const;
+
+/**
+ * Creates or updates one material.
+ *
+ * ## Why the explicit `deleteField()`
+ *
+ * The write is a merge, so Firestore leaves any key the payload does not
+ * mention exactly as it was. Combined with `pruneEmpty` -- which drops blanks
+ * so a spreadsheet's empty cell does not become the literal text "undefined"
+ * in the listing -- that meant *clearing* a field silently did nothing: the
+ * key was pruned, the merge ignored it, the old value stayed, and the UI still
+ * reported "Material updated." Deleting the supplier off an item was
+ * impossible, and looked like the save had failed.
+ *
+ * So a cleared optional field is now written as an explicit `deleteField()`.
+ * The blank-cell behaviour that `pruneEmpty` exists for is unaffected: that is
+ * the *import* path, which goes through `upsertMaterials` and still merges,
+ * because a sheet that omits a column should not wipe what is on the shelf.
+ *
+ * `quantity: 0` is a real value and must survive: zero is "we have none of
+ * these", which is a different claim from "nobody has counted these".
+ */
 export async function saveMaterial(material: Omit<Material, 'id'> & { id?: string }) {
   await authReady;
   const id = material.id || doc(collection(db, MATERIALS_COLLECTION)).id;
   const { id: _ignored, ...rest } = material;
-  await setDoc(
-    doc(db, MATERIALS_COLLECTION, id),
-    pruneEmpty({ ...rest, updatedAt: new Date().toISOString() }),
-    { merge: true }
-  );
+
+  const payload: Record<string, unknown> = pruneEmpty({
+    ...rest,
+    updatedAt: new Date().toISOString()
+  });
+
+  CLEARABLE_MATERIAL_FIELDS.forEach((field) => {
+    // `pruneEmpty` has already removed anything blank, so a field missing from
+    // the payload but present on the submitted object is one the user cleared.
+    if (!(field in payload)) payload[field] = deleteField();
+  });
+
+  await setDoc(doc(db, MATERIALS_COLLECTION, id), payload, { merge: true });
   return id;
 }
 

@@ -11,7 +11,8 @@
     "typecheck": "tsc --noEmit",
     "lint": "tsc --noEmit",
     "verify:data": "esbuild scripts/verifySeedData.ts --bundle --platform=node --format=cjs --outfile=node_modules/.cache/verify-seed-data.cjs --log-level=error && node node_modules/.cache/verify-seed-data.cjs",
-    "check": "npm run typecheck && npm run verify:data && npm run verify:import && npm run verify:template",
+    "check": "npm run typecheck && npm run verify:data && npm run verify:import && npm run verify:template && npm run verify:admin",
+    "verify:admin": "esbuild scripts/verifyAdminAuth.ts --bundle --platform=node --format=cjs --outfile=node_modules/.cache/verify-admin-auth.cjs --log-level=error && node node_modules/.cache/verify-admin-auth.cjs",
     "verify:import": "esbuild scripts/verifyMaterialImport.ts --bundle --platform=node --format=cjs --outfile=node_modules/.cache/verify-material-import.cjs --log-level=error && node node_modules/.cache/verify-material-import.cjs",
     "verify:template": "esbuild scripts/verifyMaterialTemplate.ts --bundle --platform=node --format=cjs --outfile=node_modules/.cache/verify-material-template.cjs --log-level=error --external:exceljs && node node_modules/.cache/verify-material-template.cjs"
   },
