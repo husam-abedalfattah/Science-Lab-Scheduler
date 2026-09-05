@@ -11,7 +11,7 @@ import {
   Table2,
   School
 } from 'lucide-react';
-import { Lab, Section } from '../types';
+import { AdminAccount, Lab, Material, Section } from '../types';
 import { SCHOOL_LABEL } from '../brand';
 import {
   MATERIAL_FIELDS,
@@ -22,7 +22,8 @@ import {
   buildRows,
   detectHeaderRow,
   guessMapping,
-  pickMaterialsSheet
+  pickMaterialsSheet,
+  planMaterialImport
 } from '../utils/materialImport';
 import { MAX_MATERIAL_IMPORT_ROWS } from '../constants';
 import { useModalA11y } from '../hooks/useModalA11y';
@@ -38,10 +39,22 @@ interface MaterialImportDialogProps {
   section: Section | null;
   onSelectSection: (section: Section) => void;
   labsBySection: Record<Section, Lab[]>;
-  /** Whether the admin password has already been entered this session. */
-  isAdminLoggedIn: boolean;
-  /** Returns true when the password is right; the app then flips the flag above. */
-  onLogin: (password: string) => boolean;
+  /** Who is signed in, or `null`. Each administrator has their own password. */
+  adminUser: AdminAccount | null;
+  /**
+   * Returns the account a password identifies, or `null` if none does. The app
+   * then holds that account for the session and stamps it on the audit trail.
+   *
+   * Async: an account created in the admin panel is verified against a slow
+   * salted hash rather than compared as a string.
+   */
+  onLogin: (password: string) => Promise<AdminAccount | null>;
+  /**
+   * The stockroom as it stands, so the preview can say what this sheet will
+   * actually do to it -- how many lines are new and how many add to a line
+   * already there -- before anything is written.
+   */
+  existingMaterials: Material[];
   /**
    * Why the stockroom could not be read, if it could not be. An import into a
    * collection the browser cannot even read will fail at the last step, so it
@@ -49,7 +62,7 @@ interface MaterialImportDialogProps {
    */
   loadError?: string | null;
   onClose: () => void;
-  onImport: (rows: ParsedRow[]) => Promise<{ created: number; updated: number }>;
+  onImport: (rows: ParsedRow[]) => Promise<{ created: number; merged: number }>;
 }
 
 type Stage = 'locked' | 'school' | 'pick' | 'map' | 'done';
@@ -59,9 +72,10 @@ type Stage = 'locked' | 'school' | 'pick' | 'map' | 'done';
  *
  * Four deliberate properties:
  *
- * 0. **It is administrator-only.** Everything else in the stockroom edits one
- *    row at a time; this replaces hundreds in a single press, and a wrong file
- *    silently restocks the whole school. Reading stock stays open to everyone.
+ * 0. **It is administrator-only**, and so is every other way of changing the
+ *    stockroom. This one replaces hundreds of rows in a single press, and a
+ *    wrong file restocks the whole school. Reading stays open to everyone.
+ *    Whoever's password unlocks it is the name the history records.
  * 1. **The sheet is chosen, not assumed.** A workbook has tabs, and the app's
  *    own template has four. Reading position 1 rather than the one called
  *    "Materials" is exactly what made a filled-in template import as zero rows.
@@ -73,7 +87,15 @@ type Stage = 'locked' | 'school' | 'pick' | 'map' | 'done';
  *    than "some of my items are missing".
  *
  * Nothing is written until the user presses the button on a screen that states
- * exactly how many rows will be created and updated.
+ * exactly how many lines will be created and how many will have the sheet's
+ * quantities added to them -- computed by the same `planMaterialImport` the
+ * writer uses, so the preview cannot disagree with the result.
+ *
+ * An import never deletes and never overwrites: a sheet line merges into an
+ * existing record only when the school, the lab and every other field match
+ * exactly, and then it adds to the quantity rather than replacing it. A line
+ * that differs anywhere becomes a new record instead of silently editing the
+ * old one.
  *
  * The parser itself lives in utils/materialImport.ts and is covered by
  * `npm run verify:import`.
@@ -83,8 +105,9 @@ export const MaterialImportDialog: React.FC<MaterialImportDialogProps> = ({
   section,
   onSelectSection,
   labsBySection,
-  isAdminLoggedIn,
+  adminUser,
   onLogin,
+  existingMaterials,
   loadError,
   onClose,
   onImport
@@ -96,6 +119,8 @@ export const MaterialImportDialog: React.FC<MaterialImportDialogProps> = ({
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [authError, setAuthError] = useState('');
+  /** Verifying a stored account runs PBKDF2, which takes a moment. */
+  const [isCheckingPassword, setIsCheckingPassword] = useState(false);
 
   const [fileName, setFileName] = useState('');
   const [sheets, setSheets] = useState<SheetCandidate[]>([]);
@@ -110,7 +135,7 @@ export const MaterialImportDialog: React.FC<MaterialImportDialogProps> = ({
   const [defaultLocation, setDefaultLocation] = useState('');
   const [parseError, setParseError] = useState('');
   const [isBusy, setIsBusy] = useState(false);
-  const [result, setResult] = useState<{ created: number; updated: number } | null>(null);
+  const [result, setResult] = useState<{ created: number; merged: number } | null>(null);
 
   const reset = () => {
     setStage('pick');
@@ -248,6 +273,16 @@ export const MaterialImportDialog: React.FC<MaterialImportDialogProps> = ({
         })
       : null;
 
+  /**
+   * What the sheet does to the stockroom, worked out before anything is
+   * written. Pure -- the same function the writer uses -- so the numbers on
+   * the button are the numbers that will happen, not an estimate.
+   */
+  const plan =
+    preview && section && preview.rows.length > 0
+      ? planMaterialImport(section, preview.rows, existingMaterials)
+      : null;
+
   // A required field is only actually missing if nothing supplies it -- the
   // sheet-wide defaults count.
   const missingRequired = MATERIAL_FIELDS.filter(f => {
@@ -278,7 +313,7 @@ export const MaterialImportDialog: React.FC<MaterialImportDialogProps> = ({
   // the underlying condition changes while the dialog is open: signing out of
   // the admin panel takes the import away, and an import cannot reach the file
   // picker until it knows which school's stock it is writing into.
-  const effectiveStage: Stage = !isAdminLoggedIn ? 'locked' : !section ? 'school' : stage;
+  const effectiveStage: Stage = !adminUser ? 'locked' : !section ? 'school' : stage;
 
   return (
     <div
@@ -304,7 +339,8 @@ export const MaterialImportDialog: React.FC<MaterialImportDialogProps> = ({
                 Import materials from Excel
               </h2>
               <p className="text-sm text-slate-600 mt-0.5">
-                Items already here are updated; new ones are added. Nothing is deleted.
+                New items are added; identical ones have their quantities added up. Nothing
+                is deleted or overwritten.
               </p>
             </div>
           </div>
@@ -323,13 +359,19 @@ export const MaterialImportDialog: React.FC<MaterialImportDialogProps> = ({
           <form
             onSubmit={e => {
               e.preventDefault();
-              if (onLogin(password)) {
-                setAuthError('');
-                setPassword('');
-                setStage('pick');
-              } else {
-                setAuthError('Incorrect password.');
-              }
+              if (isCheckingPassword) return;
+              setIsCheckingPassword(true);
+              void onLogin(password)
+                .then(account => {
+                  if (account) {
+                    setAuthError('');
+                    setPassword('');
+                    setStage('pick');
+                  } else {
+                    setAuthError('That password does not match any administrator.');
+                  }
+                })
+                .finally(() => setIsCheckingPassword(false));
             }}
             className="py-8 space-y-4 max-w-sm mx-auto text-center"
           >
@@ -387,9 +429,10 @@ export const MaterialImportDialog: React.FC<MaterialImportDialogProps> = ({
 
             <button
               type="submit"
-              className="w-full py-2.5 bg-brand-kingdom-700 hover:bg-brand-kingdom-800 text-white font-bold text-sm rounded-xl transition"
+              disabled={isCheckingPassword}
+              className="w-full py-2.5 bg-brand-kingdom-700 hover:bg-brand-kingdom-800 text-white font-bold text-sm rounded-xl transition disabled:opacity-60"
             >
-              Unlock import
+              {isCheckingPassword ? 'Checking…' : 'Unlock import'}
             </button>
           </form>
         )}
@@ -706,7 +749,10 @@ export const MaterialImportDialog: React.FC<MaterialImportDialogProps> = ({
                     {preview.rows.length} row{preview.rows.length === 1 ? '' : 's'} ready
                   </p>
                   <p className="text-xs text-slate-700 mt-0.5">
-                    Matched by item code where present, otherwise by name and lab.
+                    {plan
+                      ? `${plan.created} new item${plan.created === 1 ? '' : 's'}, ` +
+                        `${plan.merged} added to stock already here.`
+                      : 'Nothing already in the stockroom is deleted or overwritten.'}
                   </p>
                 </div>
                 <div
@@ -802,10 +848,15 @@ export const MaterialImportDialog: React.FC<MaterialImportDialogProps> = ({
             />
             <h3 className="text-base font-bold text-slate-900">Import finished</h3>
             <p className="text-sm text-slate-700">
-              <strong className="font-bold text-slate-900">{result.created}</strong> item
-              {result.created === 1 ? '' : 's'} added and{' '}
-              <strong className="font-bold text-slate-900">{result.updated}</strong> updated for{' '}
+              <strong className="font-bold text-slate-900">{result.created}</strong> new item
+              {result.created === 1 ? '' : 's'} added, and{' '}
+              <strong className="font-bold text-slate-900">{result.merged}</strong> existing item
+              {result.merged === 1 ? '' : 's'} had the sheet&rsquo;s quantities added on, for{' '}
               {section ? SCHOOL_LABEL[section] : 'this school'}.
+            </p>
+            <p className="text-xs text-slate-600 max-w-md mx-auto">
+              Nothing was deleted or overwritten. The change is recorded in the modification
+              history against your name.
             </p>
             <div className="flex justify-center gap-2 pt-2">
               <button

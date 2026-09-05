@@ -4,6 +4,8 @@
  * These numbers used to be duplicated (and disagree with each other) across
  * ScheduleGrid, conflictDetector and StatsBar. Change them here only.
  */
+import { AdminAccount, Section } from './types';
+import { SCHOOL_LABEL } from './brand';
 
 /** Labs the technician can service concurrently within a single period. */
 export const MAX_CONCURRENT_LABS_PER_PERIOD = 3;
@@ -141,23 +143,125 @@ export const MAX_CLASS_NAME_LENGTH = 50;
 export const MAX_LAB_NAME_LENGTH = 100;
 
 /**
- * Gate for the admin panel.
+ * Who may administer, and the password that says so.
  *
- * This is a convenience gate for the UI only -- anything shipped to the browser
- * is readable by the user. Real enforcement has to live in firestore.rules
- * (see that file), not here.
+ * There is no per-user sign-in: Firebase auth is anonymous and the lab machine
+ * is shared. What the school does have is a handful of people trusted with the
+ * stockroom and the schedule -- the boys' school lab technician, the girls'
+ * school lab technician, and whoever runs the timetable -- so each gets their
+ * own password, and the password that unlocked the session is what the audit
+ * trail records as the actor.
+ *
+ * This is a convenience gate for the UI and an accountability record, NOT a
+ * security boundary. Anything shipped to the browser is readable by the user,
+ * and a shared secret can be passed on. Real enforcement has to live in
+ * firestore.rules (see that file), not here.
+ *
+ * All accounts carry the same rights today. `section` is stamped on the audit
+ * trail so a change reads back in context; it does not restrict what the
+ * holder may edit. To make the technicians school-scoped, filter on it in
+ * App.tsx's `requireAdmin` -- nothing else depends on it staying open.
  */
 // Vite statically replaces `import.meta.env` at build time, but this module is
 // also imported by the offline data check in scripts/, which runs under plain
 // node where it is undefined. The fallback keeps that import side-effect free.
 const viteEnv: Record<string, string | boolean | undefined> = import.meta.env ?? {};
 
-export const ADMIN_PASSWORD: string =
-  (viteEnv.VITE_ADMIN_PASSWORD as string | undefined) || 'admin123';
+const envStr = (key: string): string =>
+  ((viteEnv[key] as string | undefined) || '').trim();
 
-if (!viteEnv.VITE_ADMIN_PASSWORD && viteEnv.DEV) {
-  console.warn(
-    '[config] VITE_ADMIN_PASSWORD is not set; falling back to the default admin password. ' +
-      'Set it in .env.local before deploying.'
-  );
+/**
+ * The general administrator password.
+ *
+ * Kept as a named export because it is the one that existed first and the one
+ * the deployment docs name. Falls back to the historical default so a fresh
+ * checkout runs; the dev-console warning below is the nag to set it.
+ */
+export const ADMIN_PASSWORD: string = envStr('VITE_ADMIN_PASSWORD') || 'admin123';
+
+export interface AdminAccountConfig extends AdminAccount {
+  password: string;
 }
+
+/**
+ * Accounts compiled in from `.env.local`.
+ *
+ * These are the floor, not the whole list: administrators are normally created
+ * from the Administrators tab of the admin panel and stored in Firestore. What
+ * these exist for is the case that has no other answer -- a brand-new
+ * installation with no accounts yet, or a school that has forgotten the only
+ * password it created. They are always available for that reason, and cannot
+ * be removed from inside the app.
+ *
+ * Built in order, and matched in order. An account whose password is unset is
+ * left out entirely rather than defaulting to something guessable -- a school
+ * that never issues a girls'-side technician password should not find that
+ * an empty string, or a shared fallback, unlocks it.
+ */
+export const BUILT_IN_ADMIN_ACCOUNTS: AdminAccountConfig[] = [
+  {
+    id: 'technician-boys',
+    name: envStr('VITE_ADMIN_NAME_BOYS') || `${SCHOOL_LABEL.boys} lab technician`,
+    section: 'boys' as Section,
+    password: envStr('VITE_ADMIN_PASSWORD_BOYS')
+  },
+  {
+    id: 'technician-girls',
+    name: envStr('VITE_ADMIN_NAME_GIRLS') || `${SCHOOL_LABEL.girls} lab technician`,
+    section: 'girls' as Section,
+    password: envStr('VITE_ADMIN_PASSWORD_GIRLS')
+  },
+  {
+    id: 'administrator',
+    name: envStr('VITE_ADMIN_NAME') || 'Administrator',
+    password: ADMIN_PASSWORD
+  }
+].filter(a => a.password.length > 0);
+
+/**
+ * The account a typed password identifies, or `null`.
+ *
+ * The technicians are matched before the general administrator so that a
+ * school which has (unwisely) set two of them to the same string still
+ * attributes the change to the more specific person rather than to a generic
+ * "Administrator" -- the log is more useful naming someone.
+ *
+ * Deliberately not constant-time. The comparison is against a secret already
+ * present in the bundle the attacker downloaded, so there is nothing here a
+ * timing side channel could reveal that reading the source would not.
+ */
+export function findBuiltInAdminAccount(password: string): AdminAccount | null {
+  const match = BUILT_IN_ADMIN_ACCOUNTS.find(a => a.password === password);
+  if (!match) return null;
+  const { password: _secret, ...account } = match;
+  return account;
+}
+
+if (viteEnv.DEV) {
+  if (!envStr('VITE_ADMIN_PASSWORD')) {
+    console.warn(
+      '[config] VITE_ADMIN_PASSWORD is not set; falling back to the default admin password. ' +
+        'Set it in .env.local before deploying.'
+    );
+  }
+  const seen = new Set<string>();
+  BUILT_IN_ADMIN_ACCOUNTS.forEach(a => {
+    if (seen.has(a.password)) {
+      console.warn(
+        `[config] Two admin accounts share a password; "${a.name}" will never be ` +
+          'named in the modification history. Give each person their own.'
+      );
+    }
+    seen.add(a.password);
+  });
+}
+
+/**
+ * How many modification-history entries the app holds in memory and shows.
+ *
+ * The collection itself is append-only and unbounded -- an audit trail that
+ * quietly drops its oldest evidence is not one. This only bounds what a client
+ * downloads on each load; older entries stay in Firestore and are readable
+ * from the console.
+ */
+export const MAX_AUDIT_ENTRIES = 500;

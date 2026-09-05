@@ -24,12 +24,20 @@ import {
   Ban,
   Boxes
 } from 'lucide-react';
-import { Day, Reservation, Section, SectionData } from '../types';
+import {
+  AdminAccount,
+  Day,
+  Reservation,
+  Section,
+  SectionData,
+  StoredAdminAccount
+} from '../types';
 import { DAYS_LIST } from '../data/initialData';
 import { MAX_CONCURRENT_LABS_PER_PERIOD, WEEKLY_SLOT_CAPACITY } from '../constants';
 import { getEffectiveExperimentDetails, NOT_SPECIFIED } from '../utils/experimentUtils';
 import { useModalA11y } from '../hooks/useModalA11y';
 import { AdminCharts } from './AdminCharts';
+import { AdminAccountsPanel, AdminAccountSubmission } from './AdminAccountsPanel';
 import { SCHOOL_LABEL } from '../brand';
 
 interface AdminModalProps {
@@ -38,7 +46,11 @@ interface AdminModalProps {
   section: Section;
   sectionData: SectionData;
   onClose: () => void;
-  onLogin: (pass: string) => boolean;
+  /**
+   * Async because an account created in the Administrators tab is verified
+   * against a slow salted hash rather than compared as a string.
+   */
+  onLogin: (pass: string) => Promise<boolean>;
   onLogout: () => void;
   onUpdateDeadline: (day: number, time: string) => void;
   onToggleLockSchedule: (isLocked: boolean) => void;
@@ -66,6 +78,20 @@ interface AdminModalProps {
    * afterwards: one administrator sets up both schools.
    */
   onSelectSection: (section: Section) => void;
+
+  /* --- Administrators tab --- */
+
+  /** Accounts stored in Firestore and managed from this panel. */
+  adminAccounts: StoredAdminAccount[];
+  /** Accounts compiled in from `.env.local`; listed, but not editable. */
+  builtInAdminAccounts: AdminAccount[];
+  /** Who is signed in right now. */
+  currentAdmin: AdminAccount | null;
+  /** Resolves to an error message to show on the form, or `null` on success. */
+  onSaveAdminAccount: (submission: AdminAccountSubmission) => Promise<string | null>;
+  onDeleteAdminAccount: (account: StoredAdminAccount) => void;
+  /** Why the account list could not be read, if it could not be. */
+  adminAccountsError?: string | null;
 }
 
 const inputClass =
@@ -95,7 +121,13 @@ export const AdminModal: React.FC<AdminModalProps> = ({
   onRemoveLab,
   onUnblockPeriods,
   onOpenMaterials,
-  onSelectSection
+  onSelectSection,
+  adminAccounts,
+  builtInAdminAccounts,
+  currentAdmin,
+  onSaveAdminAccount,
+  onDeleteAdminAccount,
+  adminAccountsError
 }) => {
   const panelRef = useModalA11y(isOpen, onClose);
 
@@ -113,7 +145,11 @@ export const AdminModal: React.FC<AdminModalProps> = ({
   const [passwordInput, setPasswordInput] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [authError, setAuthError] = useState('');
-  const [activeTab, setActiveTab] = useState<'settings' | 'stats' | 'log'>('settings');
+  /** Verifying a stored account runs PBKDF2, which takes a moment. */
+  const [isCheckingPassword, setIsCheckingPassword] = useState(false);
+  const [activeTab, setActiveTab] = useState<
+    'settings' | 'admins' | 'stats' | 'log'
+  >('settings');
 
   const [logSearchQuery, setLogSearchQuery] = useState('');
   const [selectedTeacherFilter, setSelectedTeacherFilter] = useState('ALL');
@@ -347,13 +383,19 @@ export const AdminModal: React.FC<AdminModalProps> = ({
 
   const handleLoginSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (onLogin(passwordInput)) {
-      setAuthError('');
-      setPasswordInput('');
-      setShowPassword(false);
-    } else {
-      setAuthError('Incorrect password.');
-    }
+    if (isCheckingPassword) return;
+    setIsCheckingPassword(true);
+    void onLogin(passwordInput)
+      .then(ok => {
+        if (ok) {
+          setAuthError('');
+          setPasswordInput('');
+          setShowPassword(false);
+        } else {
+          setAuthError('That password does not match any administrator.');
+        }
+      })
+      .finally(() => setIsCheckingPassword(false));
   };
 
   const handleDownloadFile = (fileUrl?: string, fileName?: string) => {
@@ -436,6 +478,10 @@ export const AdminModal: React.FC<AdminModalProps> = ({
 
   const tabs = [
     { id: 'settings' as const, label: 'Settings', Icon: Layers },
+    // Next to Settings rather than at the end: adding the people who may
+    // administer the site is setup, and it is the first thing a new
+    // installation needs after the rosters.
+    { id: 'admins' as const, label: 'Administrators', Icon: ShieldCheck },
     { id: 'stats' as const, label: 'Usage statistics', Icon: BarChart3 },
     { id: 'log' as const, label: 'Materials log', Icon: FlaskConical }
   ];
@@ -576,9 +622,10 @@ export const AdminModal: React.FC<AdminModalProps> = ({
 
             <button
               type="submit"
-              className="w-full py-3 bg-brand-kingdom-600 hover:bg-brand-kingdom-700 text-white font-bold text-sm rounded-xl transition"
+              disabled={isCheckingPassword}
+              className="w-full py-3 bg-brand-kingdom-600 hover:bg-brand-kingdom-700 text-white font-bold text-sm rounded-xl transition disabled:opacity-60"
             >
-              Unlock admin panel
+              {isCheckingPassword ? 'Checking…' : 'Unlock admin panel'}
             </button>
           </form>
         ) : (
@@ -1075,6 +1122,17 @@ export const AdminModal: React.FC<AdminModalProps> = ({
             )}
 
             {/* STATS */}
+            {activeTab === 'admins' && (
+              <AdminAccountsPanel
+                accounts={adminAccounts}
+                builtInAccounts={builtInAdminAccounts}
+                currentAdmin={currentAdmin}
+                onSave={onSaveAdminAccount}
+                onDelete={onDeleteAdminAccount}
+                loadError={adminAccountsError}
+              />
+            )}
+
             {activeTab === 'stats' && (
               <div className="space-y-5">
                 <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 bg-brand-kingdom-50/70 p-3.5 rounded-xl border border-brand-kingdom-300">

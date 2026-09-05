@@ -140,3 +140,120 @@ export interface AppState {
   boys: SectionData;
   girls: SectionData;
 }
+
+/* --- Who is acting, and what they did ---------------------------------- */
+
+/**
+ * An administrator identified by the password they typed.
+ *
+ * The app has no per-user sign-in -- Firebase auth is anonymous, and a school
+ * lab is a shared machine, so a per-person account is not something anyone
+ * would keep signed in. What it does have is a small set of known passwords,
+ * one per person who is trusted with the stockroom: the boys' school lab
+ * technician, the girls' school lab technician, and the administrator.
+ *
+ * That makes the password the identity. It is a weak one -- a shared secret can
+ * be passed on, and anyone can read the list out of the bundle -- so it is
+ * treated as an accountability record ("Mr Khalid's password made this
+ * change"), never as a security boundary. The boundary, such as it is, lives in
+ * firestore.rules.
+ *
+ * `section` records which school the holder belongs to. It is stamped on the
+ * audit trail so a change can be read back in context; it does not restrict
+ * what they may edit.
+ */
+export interface AdminAccount {
+  /** Stable key written to the audit trail. Never the password. */
+  id: string;
+  /** Display name, shown in the header and on every audit row. */
+  name: string;
+  /** The school this person belongs to, if they belong to one. */
+  section?: Section;
+}
+
+/**
+ * What an audit entry records having happened.
+ *
+ * `import` is one entry for a whole spreadsheet rather than one per row: an
+ * import of 400 lines would otherwise bury every hand edit in the log, and the
+ * question people actually ask of it is "who reloaded the stock list", not
+ * "which of these 400 rows".
+ */
+export type AuditAction =
+  | 'material_created'
+  | 'material_updated'
+  | 'material_deleted'
+  | 'material_imported'
+  | 'material_exported'
+  | 'reservation_cancelled'
+  | 'admin_created'
+  | 'admin_updated'
+  | 'admin_deleted';
+
+/** One field that changed, rendered as "quantity: 12 → 8". */
+export interface AuditChange {
+  field: string;
+  from: string;
+  to: string;
+}
+
+/**
+ * One line of the modification history.
+ *
+ * Append-only by design: firestore.rules allows create and denies update and
+ * delete, so a log entry cannot be edited away by the person it names. Written
+ * after the change it describes succeeds, and never allowed to fail the change
+ * itself -- a stockroom edit that worked must not report failure because the
+ * bookkeeping write did.
+ */
+export interface AuditEntry {
+  id: string;
+  /** ISO timestamp, client clock. Display metadata, not a security claim. */
+  at: string;
+  actorId: string;
+  actorName: string;
+  action: AuditAction;
+  /** The school the change landed in. */
+  section?: Section;
+  /** Firestore id of the thing changed, when there is a single one. */
+  targetId?: string;
+  /** Human label for it: the material name, or the teacher and class. */
+  targetName: string;
+  /** Field-level diff, for edits. */
+  changes?: AuditChange[];
+  /** One-line detail for actions a diff does not describe, e.g. an import. */
+  detail?: string;
+}
+
+/**
+ * An administrator account as stored in Firestore.
+ *
+ * Created and managed from the Administrators tab of the admin panel, so the
+ * school can add a person without a rebuild. The two accounts that come from
+ * `.env.local` are NOT stored here -- they are compiled in, always available,
+ * and exist so the very first administrator has a way to sign in and create
+ * the rest.
+ *
+ * **The password is never stored.** `passwordHash` is PBKDF2-SHA256 over
+ * `passwordSalt`; see src/utils/adminAuth.ts for why a hash and not the thing
+ * itself, and for the honest limits of what that buys.
+ */
+export interface StoredAdminAccount {
+  id: string;
+  /** Display name, shown in the panel and on every audit row. */
+  name: string;
+  /** The school this person belongs to, if they belong to one. */
+  section?: Section;
+
+  passwordHash: string;
+  passwordSalt: string;
+  /** Algorithm and cost the hash was produced with, for future migration. */
+  passwordScheme: string;
+
+  createdAt: string;
+  /** Name of the administrator who created it. */
+  createdBy: string;
+  updatedAt: string;
+  /** When the password was last changed, so a stale one is visible. */
+  passwordChangedAt: string;
+}

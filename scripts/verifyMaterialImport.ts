@@ -16,9 +16,11 @@ import {
   pickMaterialsSheet,
   headerRowScore,
   detectHeaderRow,
-  MaterialField
+  planMaterialImport,
+  MaterialField,
+  ParsedRow
 } from '../src/utils/materialImport';
-import type { Lab } from '../src/types';
+import type { Lab, Material } from '../src/types';
 
 const LABS: Lab[] = [
   { id: 'lab-1', name: 'Chemistry Lab', code: 'CHEM-01', capacity: 30, color: 'brand-green' },
@@ -243,6 +245,172 @@ console.log('\n=== real inventory sheets ===');
   });
   check('a row with its own lab and location overrides the defaults',
     rows[0]?.labId === 'lab-2' && rows[0]?.location === 'Fridge', rows[0]);
+}
+
+
+console.log('\n=== re-import merging ===');
+{
+  /**
+   * A stock line as it sits in the database. Every optional field is spelled
+   * out because the rule under test is "all fields must match" -- a helper
+   * that quietly omitted one would test something weaker than what ships.
+   */
+  const stock = (over: Partial<Material> = {}): Material => ({
+    id: 'm-1',
+    section: 'boys',
+    name: 'Sodium hydroxide',
+    code: 'CH-014',
+    category: 'chemical',
+    labId: 'lab-1',
+    location: 'Cabinet B',
+    quantity: 500,
+    unit: 'g',
+    minQuantity: 100,
+    hazard: 'Corrosive',
+    expiryDate: '2027-01-01',
+    supplier: 'Acme',
+    notes: '',
+    updatedAt: '2026-01-01T00:00:00.000Z',
+    ...over
+  });
+
+  /** The same line as it arrives from a spreadsheet. */
+  const sheetRow = (over: Partial<ParsedRow> = {}): ParsedRow => {
+    const { id, section, updatedAt, ...rest } = stock();
+    return { ...rest, ...over } as ParsedRow;
+  };
+
+  {
+    const plan = planMaterialImport('boys', [sheetRow({ quantity: 200 })], [stock()]);
+    check('an identical row merges rather than creating a second',
+      plan.created === 0 && plan.merged === 1, plan);
+    check('quantities are added, not replaced',
+      plan.entries[0]?.quantity === 700, plan.entries[0]?.quantity);
+    check('the merge writes into the existing document',
+      plan.entries[0]?.existing?.id === 'm-1', plan.entries[0]?.existing?.id);
+  }
+
+  {
+    // The whole point of the rule: same item, different shelf, is not the
+    // same stock line. Merging them would lose one of the two answers to
+    // "where is it", which is the question the table exists to answer.
+    const plan = planMaterialImport(
+      'boys',
+      [sheetRow({ location: 'Cabinet C', quantity: 200 })],
+      [stock()]
+    );
+    check('a different location makes a new line, it does not move the old one',
+      plan.created === 1 && plan.merged === 0, plan);
+    check('the new line carries only the sheet quantity',
+      plan.entries[0]?.quantity === 200, plan.entries[0]?.quantity);
+  }
+
+  {
+    const plan = planMaterialImport(
+      'boys',
+      [sheetRow({ labId: 'lab-2', quantity: 200 })],
+      [stock()]
+    );
+    check('a different lab makes a new line', plan.created === 1, plan);
+  }
+
+  {
+    const plan = planMaterialImport(
+      'boys',
+      [sheetRow({ supplier: 'Other Supplies', quantity: 200 })],
+      [stock()]
+    );
+    check('any single differing field is enough to keep them apart',
+      plan.created === 1 && plan.merged === 0, plan);
+  }
+
+  {
+    // Case and stray whitespace are typing, not identity.
+    const plan = planMaterialImport(
+      'boys',
+      [sheetRow({ name: '  sodium   HYDROXIDE ', quantity: 200 })],
+      [stock()]
+    );
+    check('casing and spacing do not split a line in two',
+      plan.merged === 1 && plan.entries[0]?.quantity === 700, plan);
+  }
+
+  {
+    // Two deliveries of the same thing on one sheet are one stock line with
+    // both counted, not two rows and not just the last one.
+    const plan = planMaterialImport(
+      'boys',
+      [sheetRow({ quantity: 100 }), sheetRow({ quantity: 250 })],
+      [stock()]
+    );
+    check('repeat rows within one sheet fold into a single entry',
+      plan.entries.length === 1 && plan.merged === 1, plan);
+    check('every repeat row is counted', plan.entries[0]?.quantity === 850,
+      plan.entries[0]?.quantity);
+  }
+
+  {
+    const plan = planMaterialImport(
+      'boys',
+      [sheetRow({ code: 'NEW-1', quantity: 5 }), sheetRow({ code: 'NEW-1', quantity: 7 })],
+      []
+    );
+    check('repeat rows for an item that is new also fold together',
+      plan.created === 1 && plan.entries[0]?.quantity === 12, plan);
+  }
+
+  {
+    // Cross-school bleed would be the worst failure here: the two schools keep
+    // separate stockrooms deliberately.
+    const plan = planMaterialImport(
+      'girls',
+      [sheetRow({ quantity: 200 })],
+      [stock({ section: 'boys' })]
+    );
+    check('a boys-school line is never merged into by a girls-school import',
+      plan.created === 1 && plan.merged === 0, plan);
+  }
+
+  {
+    const plan = planMaterialImport('boys', [], [stock()]);
+    check('an empty sheet touches nothing',
+      plan.entries.length === 0 && plan.created === 0 && plan.merged === 0, plan);
+  }
+
+  {
+    // Existing records the sheet never mentions must be left entirely alone --
+    // an import adds to the stockroom, it does not restore it from a backup.
+    const other = stock({ id: 'm-2', name: 'Agar', code: 'BI-002' });
+    const plan = planMaterialImport('boys', [sheetRow({ quantity: 1 })], [stock(), other]);
+    check('records the sheet does not mention are not written at all',
+      plan.entries.length === 1 && plan.entries[0]?.existing?.id === 'm-1', plan);
+  }
+
+  {
+    // A blank cell and a field the record never had are the same thing; if
+    // they were not, an item imported without a supplier would never merge
+    // with itself on the next import.
+    const plan = planMaterialImport(
+      'boys',
+      [sheetRow({ notes: undefined, quantity: 10 })],
+      [stock({ notes: '' })]
+    );
+    check('an empty string and an absent field are the same identity',
+      plan.merged === 1, plan);
+  }
+
+  {
+    // Nothing on either side names a count, so nothing should invent one --
+    // a spurious 0 reads as "we have none of these", which is a different
+    // claim from "nobody has counted these".
+    const plan = planMaterialImport(
+      'boys',
+      [sheetRow({ quantity: undefined })],
+      [stock({ quantity: undefined })]
+    );
+    check('an uncounted item does not acquire a quantity of 0',
+      plan.entries[0]?.quantity === undefined, plan.entries[0]?.quantity);
+  }
 }
 
 console.log(

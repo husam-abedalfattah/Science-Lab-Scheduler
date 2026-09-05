@@ -414,3 +414,160 @@ export function buildRows(
 
   return { rows, errors, unknownLabs: [...unknownLabs] };
 }
+
+/* --- Deciding what a re-import means ----------------------------------- */
+
+/**
+ * The fields that make one stock line the same stock line as another.
+ *
+ * Everything a material carries except `quantity` -- which is the thing being
+ * accumulated -- and `updatedAt`, which is bookkeeping. Two rows agreeing on
+ * all of these are the same shelf holding the same thing, so a re-import adds
+ * to what is there. Disagree on any one of them and they are separate stock:
+ * the same reagent in Cabinet B and Cabinet C is two entries, because "where
+ * is it" is the question this table exists to answer and averaging two answers
+ * helps nobody.
+ *
+ * The trade this makes is explicit: a typo in the spreadsheet produces a
+ * second row rather than silently overwriting the good one. That is the safe
+ * direction -- a duplicate is visible in the list and can be merged by hand;
+ * an overwrite is not visible at all.
+ */
+export const MATERIAL_IDENTITY_FIELDS = [
+  'name',
+  'code',
+  'category',
+  'labId',
+  'location',
+  'unit',
+  'minQuantity',
+  'hazard',
+  'expiryDate',
+  'supplier',
+  'notes'
+] as const;
+
+/**
+ * Comparison form of one identity field.
+ *
+ * Case- and whitespace-insensitive, because a spreadsheet that says "Sodium
+ * Hydroxide " and a record that says "sodium hydroxide" are not two chemicals.
+ * Absent, empty and undefined all collapse to the same empty string, so a
+ * blank cell matches a field the record never had -- otherwise an item
+ * imported once without a supplier would never merge with itself.
+ */
+function identityValue(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'number') return Number.isFinite(value) ? String(value) : '';
+  return String(value).trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+/** The key two rows must agree on to be treated as the same stock line. */
+export function materialIdentityKey(
+  material: Omit<Partial<Material>, 'section'> & { section?: string }
+): string {
+  return [
+    identityValue(material.section),
+    ...MATERIAL_IDENTITY_FIELDS.map(f => identityValue(material[f]))
+  ].join('\u241f');
+}
+
+/** What an import will do to one existing record or one new one. */
+export interface MaterialImportPlanEntry {
+  /** Existing document to write into, or undefined when this is a new line. */
+  existing?: Material;
+  /** The row as parsed, minus the quantity resolution below. */
+  row: ParsedRow;
+  /**
+   * Quantity to store: the existing quantity plus every matching sheet row's,
+   * or just the sheet's for a new line. `undefined` when neither side named
+   * one -- an item with no count recorded should not acquire a spurious 0.
+   */
+  quantity?: number;
+  /** How many sheet rows folded into this entry. */
+  rowCount: number;
+}
+
+export interface MaterialImportPlan {
+  entries: MaterialImportPlanEntry[];
+  /** Entries that will create a document. */
+  created: number;
+  /** Entries that add to a document already in the stockroom. */
+  merged: number;
+}
+
+/**
+ * Works out, without touching Firestore, what a sheet does to the stockroom.
+ *
+ * Three properties worth stating, because the previous behaviour had none of
+ * them and this is the part people get burnt by:
+ *
+ * 1. **Nothing in the database is ignored or replaced.** Existing records that
+ *    the sheet does not mention are left exactly as they are. An import adds;
+ *    it is not a restore-from-backup.
+ * 2. **A repeat import accumulates rather than overwrites.** Re-importing the
+ *    same 200-unit delivery note twice leaves 400 units, because that is what
+ *    two deliveries mean. The old behaviour set the quantity to the sheet's
+ *    value, so a delivery note that only listed what arrived silently wrote
+ *    off everything already on the shelf.
+ * 3. **Duplicate rows *within* one sheet fold together too**, into one record
+ *    with the summed quantity -- not two records, and not one that only keeps
+ *    the last row's count.
+ *
+ * `existing` may hold both schools; only the section being imported into is
+ * considered, so a boys'-school beaker never merges into the girls' stockroom.
+ */
+export function planMaterialImport(
+  section: string,
+  rows: ParsedRow[],
+  existing: Material[]
+): MaterialImportPlan {
+  const entries: MaterialImportPlanEntry[] = [];
+  /** Identity -> index into `entries`, so repeat rows land on one entry. */
+  const byIdentity = new Map<string, number>();
+
+  existing
+    .filter(m => m.section === section)
+    .forEach(m => {
+      const key = materialIdentityKey(m);
+      // First writer wins. A stockroom that already holds two byte-identical
+      // records (possible before this rule existed) gets its rows added to the
+      // first; the second is left untouched rather than being merged away
+      // behind the user's back.
+      if (byIdentity.has(key)) return;
+      byIdentity.set(key, entries.length);
+      entries.push({
+        existing: m,
+        row: { ...m },
+        quantity: m.quantity,
+        rowCount: 0
+      });
+    });
+
+  rows.forEach(row => {
+    const key = materialIdentityKey({ ...row, section });
+    const at = byIdentity.get(key);
+
+    if (at === undefined) {
+      byIdentity.set(key, entries.length);
+      entries.push({ row, quantity: row.quantity, rowCount: 1 });
+      return;
+    }
+
+    const entry = entries[at];
+    entry.rowCount += 1;
+    if (typeof row.quantity === 'number') {
+      entry.quantity = (entry.quantity ?? 0) + row.quantity;
+    }
+  });
+
+  // Untouched existing records are carried no further: the writer only needs
+  // the ones a row actually landed on.
+  const touched = entries.filter(e => e.rowCount > 0);
+
+  return {
+    entries: touched,
+    created: touched.filter(e => !e.existing).length,
+    merged: touched.filter(e => e.existing).length
+  };
+}

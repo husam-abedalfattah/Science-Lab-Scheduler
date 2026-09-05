@@ -9,14 +9,19 @@ import {
   ExperimentDetails,
   SupervisorReview,
   Material,
-  SectionData
+  SectionData,
+  AdminAccount,
+  AuditChange,
+  AuditEntry,
+  StoredAdminAccount
 } from './types';
 import { INITIAL_APP_STATE } from './data/initialData';
 import { detectAllConflicts } from './utils/conflictDetector';
 import { themeFor } from './theme';
 import { SCHOOL_NAME, SCHOOL_NAME_AR, SCHOOL_LABEL, DEPARTMENT_NAME } from './brand';
 import {
-  ADMIN_PASSWORD,
+  BUILT_IN_ADMIN_ACCOUNTS,
+  findBuiltInAdminAccount,
   MAX_TEACHER_NAME_LENGTH,
   MAX_CLASS_NAME_LENGTH,
   MAX_LAB_NAME_LENGTH
@@ -34,6 +39,11 @@ import {
   saveMaterial,
   deleteMaterial,
   upsertMaterials,
+  recordAudit,
+  subscribeToAudits,
+  subscribeToAdminAccounts,
+  saveAdminAccount,
+  deleteAdminAccount,
   SlotTakenError
 } from './services/firebaseService';
 
@@ -48,6 +58,18 @@ import { LockPeriodModal, LockSlot } from './components/LockPeriodModal';
 import { SectionSelector } from './components/SectionSelector';
 import { MaterialsModal } from './components/MaterialsModal';
 import { MaterialImportDialog } from './components/MaterialImportDialog';
+import { downloadMaterialTemplate } from './utils/materialTemplate';
+import {
+  findMatchingAccount,
+  hashPassword,
+  isPasswordAlreadyUsed,
+  makeSalt,
+  toAdminAccount,
+  PASSWORD_HASH_SCHEME
+} from './utils/adminAuth';
+import { AuditLogModal } from './components/AuditLogModal';
+import { AdminUnlockModal, AdminUnlockRequest } from './components/AdminUnlockModal';
+import { AdminAccountSubmission } from './components/AdminAccountsPanel';
 import { NotificationToast, ToastMessage, ToastAction } from './components/NotificationToast';
 import { ConfirmDialog, ConfirmRequest } from './components/ConfirmDialog';
 
@@ -100,7 +122,32 @@ export default function App() {
   }, []);
 
   const [currentSection, setCurrentSection] = useState<Section | null>(null);
-  const [isAdminLoggedIn, setIsAdminLoggedIn] = useState<boolean>(false);
+
+  /**
+   * Who is signed in as an administrator, or `null`.
+   *
+   * A named account rather than a boolean, because each person trusted with
+   * the stockroom has their own password (ADMIN_ACCOUNTS in constants.ts) and
+   * the modification history has to be able to say which of them acted. The
+   * boolean below is kept for the components that only care whether *someone*
+   * is signed in.
+   */
+  const [adminUser, setAdminUser] = useState<AdminAccount | null>(null);
+  const isAdminLoggedIn = adminUser !== null;
+
+  /** The gated action waiting on a password, if one is. */
+  const [unlockRequest, setUnlockRequest] = useState<AdminUnlockRequest | null>(null);
+
+  /**
+   * Administrator accounts created from the admin panel.
+   *
+   * Held in memory because the password check happens here, in the browser --
+   * there is no server to do it. What is stored is a slow salted hash, never
+   * a password; see src/utils/adminAuth.ts for what that does and does not
+   * buy.
+   */
+  const [adminAccounts, setAdminAccounts] = useState<StoredAdminAccount[]>([]);
+  const [adminAccountsError, setAdminAccountsError] = useState<string | null>(null);
 
   // Filters
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -135,6 +182,20 @@ export default function App() {
   const [materials, setMaterials] = useState<Material[]>([]);
   const [isMaterialsOpen, setIsMaterialsOpen] = useState(false);
   const [isImportOpen, setIsImportOpen] = useState(false);
+
+  /**
+   * The modification history: who changed what, newest first.
+   *
+   * Read by everyone. Only administrators can change the stockroom, but a
+   * teacher who finds an item gone should be able to see when it went and who
+   * removed it without holding a password themselves.
+   */
+  const [auditEntries, setAuditEntries] = useState<AuditEntry[]>([]);
+  const [auditError, setAuditError] = useState<string | null>(null);
+  const [isAuditOpen, setIsAuditOpen] = useState(false);
+
+  /** True while the Excel template is being generated, to label the button. */
+  const [isExportingTemplate, setIsExportingTemplate] = useState(false);
 
   /**
    * Why the stockroom is empty, when it is empty for a reason other than
@@ -180,6 +241,56 @@ export default function App() {
                   'sign-in in the Firebase console, then deploy firestore.rules ' +
                   '(`firebase deploy --only firestore:rules`).'
               : 'Could not reach the stockroom. Check the connection and reload.'
+          );
+        }
+      ),
+    []
+  );
+
+  useEffect(
+    () =>
+      subscribeToAudits(
+        entries => {
+          setAuditEntries(entries);
+          setAuditError(null);
+        },
+        err => {
+          console.error('Audit subscription error:', err);
+          const denied =
+            typeof err === 'object' && err !== null && 'code' in err &&
+            (err as { code?: string }).code === 'permission-denied';
+          setAuditError(
+            denied
+              ? 'The database is refusing access to the modification history. Deploy ' +
+                  'firestore.rules (`firebase deploy --only firestore:rules`) — the ' +
+                  '`audits` collection is new and the deployed rules predate it.'
+              : 'Could not reach the modification history. Check the connection and reload.'
+          );
+        }
+      ),
+    []
+  );
+
+  useEffect(
+    () =>
+      subscribeToAdminAccounts(
+        list => {
+          setAdminAccounts(list);
+          setAdminAccountsError(null);
+        },
+        err => {
+          console.error('Admin accounts subscription error:', err);
+          const denied =
+            typeof err === 'object' && err !== null && 'code' in err &&
+            (err as { code?: string }).code === 'permission-denied';
+          setAdminAccountsError(
+            denied
+              ? 'The database is refusing access to the administrator list. Deploy ' +
+                  'firestore.rules (`firebase deploy --only firestore:rules`) — the ' +
+                  '`adminAccounts` collection is new and the deployed rules predate it. ' +
+                  'The built-in passwords from .env.local still work meanwhile.'
+              : 'Could not reach the administrator list. The built-in passwords from ' +
+                  '.env.local still work.'
           );
         }
       ),
@@ -391,6 +502,169 @@ export default function App() {
     }
   };
 
+  /**
+   * Cancels a booking, after an administrator password.
+   *
+   * Gated for the same reason the stockroom is: cancelling removes someone
+   * else's lesson from the timetable, and until this app has real per-user
+   * sign-in there is nothing to stop a teacher deleting a colleague's slot --
+   * accidentally or otherwise. The password names who did it, and the
+   * modification history keeps the record, so a booking that vanishes can be
+   * traced rather than argued about.
+   *
+   * The undo offered afterwards is unchanged: it re-books the same slot as an
+   * override, which is what makes a mistaken cancel recoverable.
+   */
+  /* --- Managing the administrator accounts ----------------------------- */
+
+  /**
+   * Creates an account or edits one, returning a message to show on the form
+   * rather than a toast: the user is looking at the field they got wrong.
+   *
+   * Hashing happens here and the plaintext goes no further -- `saveAdminAccount`
+   * takes the derived material only, so a password cannot reach the service
+   * layer, be logged, or be written by accident.
+   */
+  const handleSaveAdminAccount = async (
+    submission: AdminAccountSubmission
+  ): Promise<string | null> => {
+    if (!adminUser) return 'Your admin session has ended. Sign in again.';
+
+    const existing = submission.id
+      ? adminAccounts.find(a => a.id === submission.id)
+      : undefined;
+
+    if (submission.id && !existing) {
+      return 'That account no longer exists — it may have just been removed.';
+    }
+
+    // A name collision is not fatal, but two "Mr Khalid" rows make the history
+    // ambiguous, which is the one thing this feature exists to prevent.
+    const nameTaken = adminAccounts.some(
+      a => a.id !== submission.id && a.name.trim().toLowerCase() === submission.name.toLowerCase()
+    );
+    if (nameTaken) {
+      return 'Another administrator already has that name. Use something that tells them apart.';
+    }
+
+    try {
+      let passwordFields: Partial<StoredAdminAccount> = {};
+
+      if (submission.password) {
+        // Sharing a password collapses two people into one name in the log.
+        if (await isPasswordAlreadyUsed(submission.password, adminAccounts, submission.id)) {
+          return 'Another administrator already uses that password. Each person needs their own.';
+        }
+        const passwordSalt = makeSalt();
+        passwordFields = {
+          passwordSalt,
+          passwordHash: await hashPassword(submission.password, passwordSalt),
+          passwordScheme: PASSWORD_HASH_SCHEME,
+          passwordChangedAt: new Date().toISOString()
+        };
+      }
+
+      const now = new Date().toISOString();
+      const id = await saveAdminAccount({
+        id: submission.id,
+        name: submission.name,
+        section: submission.section,
+        createdAt: existing?.createdAt || now,
+        createdBy: existing?.createdBy || adminUser.name,
+        updatedAt: now,
+        passwordHash: existing?.passwordHash || '',
+        passwordSalt: existing?.passwordSalt || '',
+        passwordScheme: existing?.passwordScheme || PASSWORD_HASH_SCHEME,
+        passwordChangedAt: existing?.passwordChangedAt || now,
+        ...passwordFields
+      });
+
+      const changes: AuditChange[] = [];
+      if (existing) {
+        if (existing.name !== submission.name) {
+          changes.push({ field: 'Name', from: existing.name, to: submission.name });
+        }
+        if ((existing.section || '') !== (submission.section || '')) {
+          changes.push({
+            field: 'School',
+            from: existing.section ? SCHOOL_LABEL[existing.section] : 'Both schools',
+            to: submission.section ? SCHOOL_LABEL[submission.section] : 'Both schools'
+          });
+        }
+        if (submission.password) {
+          // Recorded as an event, never as a value -- neither side of a
+          // password change belongs in a log every teacher can read.
+          changes.push({ field: 'Password', from: 'set', to: 'changed' });
+        }
+      }
+
+      logAudit(adminUser, {
+        action: existing ? 'admin_updated' : 'admin_created',
+        section: submission.section,
+        targetId: id,
+        targetName: submission.name,
+        changes: changes.length > 0 ? changes : undefined,
+        detail: existing
+          ? undefined
+          : `New administrator${submission.section ? ` for ${SCHOOL_LABEL[submission.section]}` : ''}`
+      });
+
+      showToast(
+        existing ? `${submission.name} updated.` : `${submission.name} can now sign in.`,
+        'success'
+      );
+      return null;
+    } catch (err) {
+      console.error('Save admin account error:', err);
+      return 'Could not save that account. Check the connection and try again.';
+    }
+  };
+
+  const handleDeleteAdminAccount = (account: StoredAdminAccount) => {
+    if (!adminUser) return;
+
+    const isSelf = adminUser.id === account.id;
+
+    setConfirmRequest({
+      title: `Remove ${account.name}?`,
+      message:
+        `${account.name} will no longer be able to sign in, and their password stops ` +
+        'working immediately. Changes they already made stay in the modification ' +
+        'history under their name.' +
+        (isSelf ? ' This is the account you are signed in as — you will be signed out.' : ''),
+      confirmLabel: 'Remove administrator',
+      tone: 'danger',
+      onConfirm: () => {
+        void (async () => {
+          try {
+            await deleteAdminAccount(account.id);
+
+            logAudit(adminUser, {
+              action: 'admin_deleted',
+              section: account.section,
+              targetId: account.id,
+              targetName: account.name,
+              detail: isSelf ? 'Removed their own account' : undefined
+            });
+
+            showToast(`${account.name} removed.`, 'success');
+
+            // Signing out is not optional here: the session is holding an
+            // identity that no longer exists, and every later change would be
+            // recorded against a deleted account.
+            if (isSelf) {
+              setAdminUser(null);
+              showToast('You removed your own account, so you have been signed out.', 'info');
+            }
+          } catch (err) {
+            console.error('Delete admin account error:', err);
+            showToast('Could not remove that account.', 'error');
+          }
+        })();
+      }
+    });
+  };
+
   const handleCancelReservation = (reservationId: string) => {
     if (!currentSection || !currentSectionData) return;
 
@@ -398,55 +672,146 @@ export default function App() {
       .flat()
       .find(r => r && r.id === reservationId);
 
-    const doCancel = async () => {
-      try {
-        await removeReservation(reservationId);
-        showToast(
-          'Reservation cancelled.',
-          'info',
-          target
-            ? {
-                label: 'Undo',
-                onClick: () => {
-                  addOrUpdateReservation(currentSection, target, true).catch(() =>
-                    showToast('Could not restore the reservation.', 'error')
-                  );
-                }
-              }
-            : undefined
-        );
-      } catch (err) {
-        console.error('Cancel reservation error:', err);
-        showToast('Failed to cancel the reservation.', 'error');
-      }
-    };
+    requireAdmin(
+      target ? `Cancel ${target.teacher}'s booking` : 'Cancel this booking',
+      'Cancelling a booking needs an administrator password, and is recorded against you.',
+      admin => {
+        const doCancel = async () => {
+          try {
+            await removeReservation(reservationId);
+            showToast(
+              'Reservation cancelled.',
+              'info',
+              target
+                ? {
+                    label: 'Undo',
+                    onClick: () => {
+                      addOrUpdateReservation(currentSection, target, true).catch(() =>
+                        showToast('Could not restore the reservation.', 'error')
+                      );
+                    }
+                  }
+                : undefined
+            );
 
-    setConfirmRequest({
-      title: 'Cancel this reservation?',
-      message: target
-        ? `${target.teacher} — Class ${target.className}, ${target.day} Period ${target.period}. You can undo this straight after.`
-        : 'This booking will be removed from the schedule.',
-      confirmLabel: 'Cancel booking',
-      onConfirm: () => {
-        void doCancel();
+            logAudit(admin, {
+              action: 'reservation_cancelled',
+              section: currentSection,
+              targetId: reservationId,
+              targetName: target
+                ? `${target.teacher} — Class ${target.className}`
+                : 'A booking',
+              detail: target
+                ? `${target.day} period ${target.period}, ${labNameFor(target.labId)}` +
+                  (target.experimentDetails?.experimentName
+                    ? ` · ${target.experimentDetails.experimentName}`
+                    : '')
+                : undefined
+            });
+          } catch (err) {
+            console.error('Cancel reservation error:', err);
+            showToast('Failed to cancel the reservation.', 'error');
+          }
+        };
+
+        setConfirmRequest({
+          title: 'Cancel this reservation?',
+          message: target
+            ? `${target.teacher} — Class ${target.className}, ${target.day} Period ` +
+              `${target.period}. You can undo this straight after.`
+            : 'This booking will be removed from the schedule.',
+          confirmLabel: 'Cancel booking',
+          onConfirm: () => {
+            void doCancel();
+          }
+        });
       }
-    });
+    );
   };
 
-  // Admin
-  const handleAdminLogin = (pass: string) => {
-    if (pass === ADMIN_PASSWORD) {
-      setIsAdminLoggedIn(true);
-      showToast('Admin access granted.', 'success');
-      return true;
-    }
-    return false;
+  /* --- Administrator identity and the gate ----------------------------- */
+
+  /**
+   * Resolves a typed password to the person it belongs to and signs them in.
+   *
+   * Two sources, tried in this order:
+   *
+   * 1. **Accounts created in the admin panel**, stored in Firestore. Verified
+   *    against a slow salted hash, which is why this is async.
+   * 2. **Built-in accounts from `.env.local`**, compiled into the bundle.
+   *    Tried second so that an account someone deliberately created here wins
+   *    over a configuration default that happens to collide.
+   *
+   * The built-ins are never removed, even once real accounts exist. They are
+   * the way back in when the only stored password has been forgotten -- the
+   * alternative is a school locked out of its own stockroom with no recourse
+   * short of the Firebase console.
+   *
+   * Returns the account so the caller can act on it immediately: `setAdminUser`
+   * will not have taken effect by the time this resolves.
+   */
+  const authenticateAdmin = async (pass: string): Promise<AdminAccount | null> => {
+    const stored = await findMatchingAccount(pass, adminAccounts);
+    const account = stored ? toAdminAccount(stored) : findBuiltInAdminAccount(pass);
+    if (!account) return null;
+
+    setAdminUser(account);
+    showToast(`Signed in as ${account.name}.`, 'success');
+    return account;
   };
+
+  /** Boolean form, for the panels whose prop predates named accounts. */
+  const handleAdminLogin = async (pass: string) => (await authenticateAdmin(pass)) !== null;
 
   const handleAdminLogout = () => {
-    setIsAdminLoggedIn(false);
+    setAdminUser(null);
     setIsAdminModalOpen(false);
     showToast('Admin session ended.', 'info');
+  };
+
+  /**
+   * Runs `action` as an administrator, asking for a password first if nobody
+   * is signed in.
+   *
+   * The account is passed in rather than read from state, so the action can
+   * name the actor in the audit trail on the very first call -- reading
+   * `adminUser` there would still see `null`, because React has not re-rendered
+   * yet.
+   *
+   * Every account has the same rights today; `account.section` is recorded for
+   * context, not enforced. To make the two technicians school-scoped, compare
+   * it against the target section here and refuse -- this is the only place
+   * that would need to change.
+   */
+  const requireAdmin = (
+    intent: string,
+    message: string,
+    action: (admin: AdminAccount) => void
+  ) => {
+    if (adminUser) {
+      action(adminUser);
+      return;
+    }
+    setUnlockRequest({ title: intent, message, onGranted: action });
+  };
+
+  /**
+   * Writes one line of the modification history.
+   *
+   * Fire-and-forget on purpose: `recordAudit` swallows its own errors, so a
+   * change that succeeded is never reported as failed because the bookkeeping
+   * behind it did not land.
+   */
+  const logAudit = (
+    admin: AdminAccount,
+    entry: Omit<AuditEntry, 'id' | 'at' | 'actorId' | 'actorName'>
+  ) => {
+    void recordAudit({
+      at: new Date().toISOString(),
+      actorId: admin.id,
+      actorName: admin.name,
+      ...entry
+    });
   };
 
   const handleUpdateDeadline = async (day: number, time: string) => {
@@ -553,50 +918,198 @@ export default function App() {
     }
   };
 
-  const handleSaveMaterial = async (
-    material: Omit<Material, 'id' | 'updatedAt'> & { id?: string }
-  ) => {
-    try {
-      await saveMaterial({ ...material, updatedAt: '' });
-      showToast(material.id ? 'Material updated.' : 'Material added.', 'success');
-    } catch (err) {
-      console.error('Save material error:', err);
-      showToast('Could not save that material.', 'error');
-    }
+  /**
+   * Field labels for the modification history, so a diff reads as
+   * "Minimum quantity 5 -> 10" rather than "minQuantity 5 -> 10".
+   */
+  const MATERIAL_FIELD_LABELS: Record<string, string> = {
+    name: 'Name',
+    code: 'Item code',
+    category: 'Category',
+    labId: 'Lab',
+    location: 'Location',
+    quantity: 'Quantity',
+    unit: 'Unit',
+    minQuantity: 'Minimum quantity',
+    hazard: 'Hazard',
+    expiryDate: 'Expiry date',
+    supplier: 'Supplier',
+    notes: 'Notes'
   };
 
-  const handleDeleteMaterial = (material: Material) => {
-    setConfirmRequest({
-      title: `Delete ${material.name}?`,
-      message:
-        'This removes the item from the stock list. Bookings and requisitions are not affected.',
-      confirmLabel: 'Delete item',
-      tone: 'danger',
-      onConfirm: () => {
+  /** Lab ids mean nothing to a reader; names do. */
+  const labNameFor = useCallback(
+    (labId: string) =>
+      [...appState.boys.labs, ...appState.girls.labs].find(l => l.id === labId)?.name || labId,
+    [appState.boys.labs, appState.girls.labs]
+  );
+
+  /**
+   * What actually changed between the stored item and the edited one.
+   *
+   * Only the fields the form can touch, and only the ones that differ --
+   * `updatedAt` moves on every save and would otherwise be the one entry on
+   * every row, drowning the change the reader came to find.
+   */
+  const diffMaterial = (before: Material, after: Partial<Material>): AuditChange[] => {
+    const show = (field: string, value: unknown) => {
+      if (value === undefined || value === null || value === '') return '';
+      return field === 'labId' ? labNameFor(String(value)) : String(value);
+    };
+    return Object.keys(MATERIAL_FIELD_LABELS)
+      .map(field => {
+        const from = show(field, (before as unknown as Record<string, unknown>)[field]);
+        const to = show(field, (after as Record<string, unknown>)[field]);
+        return from === to ? null : { field: MATERIAL_FIELD_LABELS[field], from, to };
+      })
+      .filter((c): c is AuditChange => c !== null);
+  };
+
+  const handleSaveMaterial = (
+    material: Omit<Material, 'id' | 'updatedAt'> & { id?: string }
+  ) => {
+    const existing = material.id ? materials.find(m => m.id === material.id) : undefined;
+
+    requireAdmin(
+      material.id ? `Save changes to ${material.name}` : `Add ${material.name || 'a material'}`,
+      'Changing the stockroom needs an administrator password, and is recorded against you.',
+      admin => {
         void (async () => {
           try {
-            await deleteMaterial(material.id);
-            showToast('Material deleted.', 'success');
+            const id = await saveMaterial({ ...material, updatedAt: '' });
+            showToast(material.id ? 'Material updated.' : 'Material added.', 'success');
+
+            logAudit(admin, {
+              action: existing ? 'material_updated' : 'material_created',
+              section: material.section,
+              targetId: id,
+              targetName: material.name,
+              // A create has no "before", so a diff would be every field
+              // against nothing -- noise. The detail line says where it went.
+              changes: existing ? diffMaterial(existing, material) : undefined,
+              detail: existing
+                ? undefined
+                : `${labNameFor(material.labId)} · ${material.location}`
+            });
           } catch (err) {
-            console.error('Delete material error:', err);
-            showToast('Could not delete that material.', 'error');
+            console.error('Save material error:', err);
+            showToast('Could not save that material.', 'error');
           }
         })();
       }
-    });
+    );
+  };
+
+  const handleDeleteMaterial = (material: Material) => {
+    requireAdmin(
+      `Delete ${material.name}`,
+      'Deleting from the stockroom needs an administrator password, and is recorded ' +
+        'against you.',
+      admin => {
+        setConfirmRequest({
+          title: `Delete ${material.name}?`,
+          message:
+            'This removes the item from the stock list. Bookings and requisitions are not ' +
+            'affected.',
+          confirmLabel: 'Delete item',
+          tone: 'danger',
+          onConfirm: () => {
+            void (async () => {
+              try {
+                await deleteMaterial(material.id);
+                showToast('Material deleted.', 'success');
+
+                // The record is about to stop existing, so the entry carries
+                // enough of it to be read on its own. "Who deleted the sodium
+                // hydroxide" is unanswerable if the log only holds an id
+                // pointing at a document that is gone.
+                logAudit(admin, {
+                  action: 'material_deleted',
+                  section: material.section,
+                  targetId: material.id,
+                  targetName: material.name,
+                  detail:
+                    `${labNameFor(material.labId)} · ${material.location}` +
+                    (typeof material.quantity === 'number'
+                      ? ` · ${material.quantity}${material.unit ? ` ${material.unit}` : ''}`
+                      : '')
+                });
+              } catch (err) {
+                console.error('Delete material error:', err);
+                showToast('Could not delete that material.', 'error');
+              }
+            })();
+          }
+        });
+      }
+    );
   };
 
   const handleImportMaterials = async (
     rows: Omit<Material, 'id' | 'section' | 'updatedAt'>[]
   ) => {
-    if (!importSection) return { created: 0, updated: 0 };
+    // The dialog cannot reach this without both, but the types do not know
+    // that and a silent no-op would look like a failed import.
+    if (!importSection || !adminUser) return { created: 0, merged: 0 };
+
     const result = await upsertMaterials(importSection, rows, materials);
     showToast(
-      `Imported ${result.created} new and updated ${result.updated} item` +
-        `${result.created + result.updated === 1 ? '' : 's'}.`,
+      `Imported ${result.created} new item${result.created === 1 ? '' : 's'}; ` +
+        `${result.merged} existing item${result.merged === 1 ? '' : 's'} topped up.`,
       'success'
     );
+
+    // One entry for the whole sheet, not one per row: 400 rows of log would
+    // bury every hand edit around them, and the question people ask of this is
+    // "who reloaded the stock list", not "which of these 400 rows".
+    logAudit(adminUser, {
+      action: 'material_imported',
+      section: importSection,
+      targetName: `${rows.length} row${rows.length === 1 ? '' : 's'} from a spreadsheet`,
+      detail:
+        `${result.created} new item${result.created === 1 ? '' : 's'} added, ` +
+        `${result.merged} existing item${result.merged === 1 ? '' : 's'} had quantities ` +
+        'added on. Nothing was deleted or overwritten.'
+    });
+
     return result;
+  };
+
+  /**
+   * The blank Excel template, gated like the import.
+   *
+   * It is the other half of the same operation -- the sheet goes out, comes
+   * back filled in, and is imported -- and it carries the school's real lab
+   * list, so it is treated as an export rather than as a help file.
+   */
+  const handleExportTemplate = (section: Section | null) => {
+    requireAdmin(
+      'Download the Excel template',
+      'Exporting the stock sheet needs an administrator password, and is recorded ' +
+        'against you.',
+      admin => {
+        setIsExportingTemplate(true);
+        void downloadMaterialTemplate(section, {
+          boys: appState.boys.labs,
+          girls: appState.girls.labs
+        })
+          .then(() => {
+            logAudit(admin, {
+              action: 'material_exported',
+              section: section ?? undefined,
+              targetName: 'Blank Excel stock template',
+              detail: section
+                ? `Lab list for ${SCHOOL_LABEL[section]}`
+                : 'Lab lists for both schools'
+            });
+          })
+          .catch(err => {
+            console.error('Template download failed:', err);
+            showToast('Could not build the Excel template.', 'error');
+          })
+          .finally(() => setIsExportingTemplate(false));
+      }
+    );
   };
 
   const handleAddTeacher = async (name: string) => {
@@ -910,6 +1423,12 @@ export default function App() {
           onRemoveLab={handleRemoveLab}
           onUnblockPeriods={handleUnblockPeriods}
           onOpenMaterials={() => setIsMaterialsOpen(true)}
+          adminAccounts={adminAccounts}
+          builtInAdminAccounts={BUILT_IN_ADMIN_ACCOUNTS.map(({ password: _p, ...a }) => a)}
+          currentAdmin={adminUser}
+          onSaveAdminAccount={handleSaveAdminAccount}
+          onDeleteAdminAccount={handleDeleteAdminAccount}
+          adminAccountsError={adminAccountsError}
         />
         {/* No school chosen yet, so this covers both and the importer -- which
             writes into one school -- is not offered. */}
@@ -922,7 +1441,18 @@ export default function App() {
           onSave={handleSaveMaterial}
           onDelete={handleDeleteMaterial}
           onOpenImport={openImport}
-          isAdminLoggedIn={isAdminLoggedIn}
+          onOpenHistory={() => setIsAuditOpen(true)}
+          onExportTemplate={() => handleExportTemplate(null)}
+          isExporting={isExportingTemplate}
+          onRequireAdmin={(intent, run) =>
+            requireAdmin(
+              intent,
+              'Changing the stockroom needs an administrator password, and is recorded ' +
+                'against you.',
+              () => run()
+            )
+          }
+          adminUser={adminUser}
           loadError={materialsError}
         />
 
@@ -931,11 +1461,26 @@ export default function App() {
           section={importSection}
           onSelectSection={setImportSection}
           labsBySection={{ boys: appState.boys.labs, girls: appState.girls.labs }}
-          isAdminLoggedIn={isAdminLoggedIn}
-          onLogin={handleAdminLogin}
+          adminUser={adminUser}
+          onLogin={authenticateAdmin}
+          existingMaterials={materials}
           loadError={materialsError}
           onClose={() => setIsImportOpen(false)}
           onImport={handleImportMaterials}
+        />
+
+        <AuditLogModal
+          isOpen={isAuditOpen}
+          section={null}
+          entries={auditEntries}
+          onClose={() => setIsAuditOpen(false)}
+          loadError={auditError}
+        />
+
+        <AdminUnlockModal
+          request={unlockRequest}
+          onAuthenticate={authenticateAdmin}
+          onClose={() => setUnlockRequest(null)}
         />
 
         <ConfirmDialog request={confirmRequest} onClose={() => setConfirmRequest(null)} />
@@ -1093,6 +1638,12 @@ export default function App() {
         onClose={() => setIsAdminModalOpen(false)}
         onLogin={handleAdminLogin}
         onLogout={handleAdminLogout}
+        adminAccounts={adminAccounts}
+        builtInAdminAccounts={BUILT_IN_ADMIN_ACCOUNTS.map(({ password: _p, ...a }) => a)}
+        currentAdmin={adminUser}
+        onSaveAdminAccount={handleSaveAdminAccount}
+        onDeleteAdminAccount={handleDeleteAdminAccount}
+        adminAccountsError={adminAccountsError}
         onUpdateDeadline={handleUpdateDeadline}
         onToggleLockSchedule={handleToggleLockSchedule}
         onOpenNewWeek={handleOpenNewWeek}
@@ -1134,7 +1685,18 @@ export default function App() {
         onSave={handleSaveMaterial}
         onDelete={handleDeleteMaterial}
         onOpenImport={openImport}
-        isAdminLoggedIn={isAdminLoggedIn}
+        onOpenHistory={() => setIsAuditOpen(true)}
+        onExportTemplate={() => handleExportTemplate(currentSection)}
+        isExporting={isExportingTemplate}
+        onRequireAdmin={(intent, run) =>
+          requireAdmin(
+            intent,
+            'Changing the stockroom needs an administrator password, and is recorded ' +
+              'against you.',
+            () => run()
+          )
+        }
+        adminUser={adminUser}
         loadError={materialsError}
       />
 
@@ -1143,11 +1705,28 @@ export default function App() {
         section={importSection}
         onSelectSection={setImportSection}
         labsBySection={{ boys: appState.boys.labs, girls: appState.girls.labs }}
-        isAdminLoggedIn={isAdminLoggedIn}
-        onLogin={handleAdminLogin}
+        adminUser={adminUser}
+        onLogin={authenticateAdmin}
+        existingMaterials={materials}
         loadError={materialsError}
         onClose={() => setIsImportOpen(false)}
         onImport={handleImportMaterials}
+      />
+
+      <AuditLogModal
+        isOpen={isAuditOpen}
+        section={currentSection}
+        entries={auditEntries}
+        onClose={() => setIsAuditOpen(false)}
+        loadError={auditError}
+      />
+
+      {/* Raised by whichever action needed it, and rendered last so it sits
+          above the modal that asked. */}
+      <AdminUnlockModal
+        request={unlockRequest}
+        onAuthenticate={authenticateAdmin}
+        onClose={() => setUnlockRequest(null)}
       />
 
       <ConfirmDialog request={confirmRequest} onClose={() => setConfirmRequest(null)} />

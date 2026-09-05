@@ -11,9 +11,10 @@ import {
   MapPin,
   SearchX,
   Download,
-  Lock
+  Lock,
+  History
 } from 'lucide-react';
-import { Lab, Material, MaterialCategory, Section } from '../types';
+import { AdminAccount, Lab, Material, MaterialCategory, Section } from '../types';
 import {
   MATERIAL_CATEGORIES,
   MATERIAL_UNITS,
@@ -24,7 +25,6 @@ import {
   MAX_MATERIAL_TEXT_LENGTH
 } from '../constants';
 import { useModalA11y } from '../hooks/useModalA11y';
-import { downloadMaterialTemplate } from '../utils/materialTemplate';
 import { SCHOOL_LABEL } from '../brand';
 
 interface MaterialsModalProps {
@@ -45,12 +45,31 @@ interface MaterialsModalProps {
   ) => void;
   onDelete: (material: Material) => void;
   onOpenImport: () => void;
+  /** Opens the modification history. Readable by everyone. */
+  onOpenHistory: () => void;
   /**
-   * Only used to label the import button. The gate itself lives in the import
-   * dialog, which asks for the password rather than refusing silently -- a
-   * disabled button with no way to unlock it is a dead end.
+   * Downloads the blank Excel template. Administrator-only like the import,
+   * so it is raised through the app rather than run here: the app asks for the
+   * password, then calls back.
    */
-  isAdminLoggedIn: boolean;
+  onExportTemplate: () => void;
+  /** True while the template workbook is being built, to label the button. */
+  isExporting: boolean;
+  /**
+   * Raises the password prompt for an action that happens inside this modal,
+   * running `run` once an administrator is signed in -- immediately, if one
+   * already is. Asked before the form opens rather than at save time: filling
+   * in twelve fields and only then being told you may not is worse than being
+   * told at the door.
+   */
+  onRequireAdmin: (intent: string, run: () => void) => void;
+  /**
+   * Who is signed in, or `null`. Used to label the gated buttons -- the gates
+   * themselves are the app's, which raises a password prompt rather than
+   * refusing silently. A disabled button with no way to unlock it is a dead
+   * end, so every action stays pressable and asks when pressed.
+   */
+  adminUser: AdminAccount | null;
   /**
    * Why the list could not be loaded, if it could not be. Distinct from an
    * empty stockroom, which is what a denied read used to look like.
@@ -103,10 +122,15 @@ function flagsFor(m: Material): { low: boolean; expired: boolean; soon: boolean 
 /**
  * The stockroom.
  *
- * Open to everyone, not gated behind the admin password, for the same reason
- * period blocking is not: the lab technician owns this data and does not hold
- * that password, and there is no per-user identity to gate on anyway. Search is
- * the common case, so it is the thing the modal opens on.
+ * **Reading is open to everyone; changing it is not.** Search is what most
+ * people come here for -- "where is the sodium hydroxide" -- and that needs no
+ * password. Adding, editing, deleting, importing and exporting all do: each
+ * button stays pressable and raises the password prompt when pressed, so the
+ * gate is discoverable rather than a greyed-out control with no way past it.
+ *
+ * The password is also the identity. Each person trusted with the stockroom
+ * has their own (ADMIN_ACCOUNTS in src/constants.ts), and every change is
+ * written to the modification history against whoever's password unlocked it.
  *
  * Filtering is client-side over the whole collection. Firestore cannot do
  * substring search, and a school lab runs to hundreds of items — small enough
@@ -121,7 +145,11 @@ export const MaterialsModal: React.FC<MaterialsModalProps> = ({
   onSave,
   onDelete,
   onOpenImport,
-  isAdminLoggedIn,
+  onOpenHistory,
+  onExportTemplate,
+  isExporting,
+  onRequireAdmin,
+  adminUser,
   loadError
 }) => {
   const panelRef = useModalA11y(isOpen, onClose);
@@ -132,7 +160,6 @@ export const MaterialsModal: React.FC<MaterialsModalProps> = ({
   const [categoryFilter, setCategoryFilter] = useState<'ALL' | MaterialCategory>('ALL');
   const [draft, setDraft] = useState<Draft | null>(null);
   const [formError, setFormError] = useState('');
-  const [isBuildingTemplate, setIsBuildingTemplate] = useState(false);
 
   /** Which school(s) this view covers. */
   const scope: Section[] = section ? [section] : ['boys', 'girls'];
@@ -182,14 +209,18 @@ export const MaterialsModal: React.FC<MaterialsModalProps> = ({
   if (!isOpen) return null;
 
   const startAdd = () => {
-    setFormError('');
-    const sec: Section = section || (schoolFilter === 'ALL' ? 'boys' : schoolFilter);
-    setDraft(emptyDraft(sec, labsBySection[sec]?.[0]?.id || ''));
+    onRequireAdmin('Add a material', () => {
+      setFormError('');
+      const sec: Section = section || (schoolFilter === 'ALL' ? 'boys' : schoolFilter);
+      setDraft(emptyDraft(sec, labsBySection[sec]?.[0]?.id || ''));
+    });
   };
 
   const startEdit = (m: Material) => {
-    setFormError('');
-    setDraft({ ...m });
+    onRequireAdmin(`Edit ${m.name}`, () => {
+      setFormError('');
+      setDraft({ ...m });
+    });
   };
 
   const submit = (e: React.FormEvent) => {
@@ -326,25 +357,41 @@ export const MaterialsModal: React.FC<MaterialsModalProps> = ({
             ))}
           </select>
 
-          {/* The blank sheet to fill in. Its headings are exactly the ones the
-              importer recognises, so a filled-in template comes straight back
-              with no column mapping to do. */}
+          {/* Who changed what. No password: only administrators can alter the
+              stockroom, but a teacher who finds an item gone should be able to
+              see when it went and who removed it. */}
           <button
             type="button"
-            onClick={() => {
-              setIsBuildingTemplate(true);
-              void downloadMaterialTemplate(section, labsBySection)
-                .catch(err => console.error('Template download failed:', err))
-                .finally(() => setIsBuildingTemplate(false));
-            }}
-            disabled={isBuildingTemplate}
-            title="Download a blank Excel sheet to fill in"
+            onClick={onOpenHistory}
+            title="See who added, edited or deleted items"
+            className="inline-flex items-center gap-1.5 px-3 py-2 bg-white hover:bg-slate-100 text-slate-800 border border-slate-300 rounded-lg text-sm font-semibold transition"
+          >
+            <History className="w-4 h-4" aria-hidden="true" />
+            <span className="hidden sm:inline">History</span>
+          </button>
+
+          {/* The blank sheet to fill in. Its headings are exactly the ones the
+              importer recognises, so a filled-in template comes straight back
+              with no column mapping to do. Administrator-only: it carries the
+              school's real lab list, and it is the other half of the import. */}
+          <button
+            type="button"
+            onClick={onExportTemplate}
+            disabled={isExporting}
+            title={
+              adminUser
+                ? 'Download a blank Excel sheet to fill in'
+                : 'Download a blank Excel sheet — needs an admin password'
+            }
             className="inline-flex items-center gap-1.5 px-3 py-2 bg-white hover:bg-slate-100 text-slate-800 border border-slate-300 rounded-lg text-sm font-semibold transition disabled:opacity-50"
           >
             <Download className="w-4 h-4" aria-hidden="true" />
             <span className="hidden sm:inline">
-              {isBuildingTemplate ? 'Preparing…' : 'Excel template'}
+              {isExporting ? 'Preparing…' : 'Excel template'}
             </span>
+            {!adminUser && (
+              <Lock className="w-3 h-3 text-slate-500" aria-label="Administrator only" />
+            )}
           </button>
 
           {/* Always available. An import does need one school chosen, and from
@@ -355,15 +402,15 @@ export const MaterialsModal: React.FC<MaterialsModalProps> = ({
             type="button"
             onClick={onOpenImport}
             title={
-              isAdminLoggedIn
+              adminUser
                 ? 'Import a stock list from Excel'
-                : 'Import a stock list from Excel — needs the admin password'
+                : 'Import a stock list from Excel — needs an admin password'
             }
             className="inline-flex items-center gap-1.5 px-3 py-2 bg-white hover:bg-slate-100 text-slate-800 border border-slate-300 rounded-lg text-sm font-semibold transition disabled:opacity-50 disabled:cursor-not-allowed"
           >
             <FileSpreadsheet className="w-4 h-4" aria-hidden="true" />
             <span className="hidden sm:inline">Import Excel</span>
-            {!isAdminLoggedIn && (
+            {!adminUser && (
               <Lock className="w-3 h-3 text-slate-500" aria-label="Administrator only" />
             )}
           </button>
@@ -373,10 +420,19 @@ export const MaterialsModal: React.FC<MaterialsModalProps> = ({
             onClick={startAdd}
             disabled={labs.length === 0}
             className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-brand-kingdom-700 hover:bg-brand-kingdom-800 text-white rounded-lg text-sm font-bold transition disabled:opacity-50 disabled:cursor-not-allowed"
-            title={labs.length === 0 ? 'Add a lab first' : 'Add a material'}
+            title={
+              labs.length === 0
+                ? 'Add a lab first'
+                : adminUser
+                  ? 'Add a material'
+                  : 'Add a material — needs an admin password'
+            }
           >
             <Plus className="w-4 h-4" aria-hidden="true" />
             <span className="hidden sm:inline">Add item</span>
+            {!adminUser && (
+              <Lock className="w-3 h-3 text-white/80" aria-label="Administrator only" />
+            )}
           </button>
         </div>
 
@@ -504,7 +560,11 @@ export const MaterialsModal: React.FC<MaterialsModalProps> = ({
                           <button
                             type="button"
                             onClick={() => startEdit(m)}
-                            aria-label={`Edit ${m.name}`}
+                            aria-label={
+                              adminUser
+                                ? `Edit ${m.name}`
+                                : `Edit ${m.name} — needs an admin password`
+                            }
                             className="min-h-6 min-w-6 inline-flex items-center justify-center text-slate-700 hover:text-brand-kingdom-800 hover:bg-brand-kingdom-50 rounded transition"
                           >
                             <Pencil className="w-3.5 h-3.5" aria-hidden="true" />
@@ -512,7 +572,11 @@ export const MaterialsModal: React.FC<MaterialsModalProps> = ({
                           <button
                             type="button"
                             onClick={() => onDelete(m)}
-                            aria-label={`Delete ${m.name}`}
+                            aria-label={
+                              adminUser
+                                ? `Delete ${m.name}`
+                                : `Delete ${m.name} — needs an admin password`
+                            }
                             className="min-h-6 min-w-6 inline-flex items-center justify-center text-slate-700 hover:text-brand-coral-800 hover:bg-brand-coral-50 rounded transition"
                           >
                             <Trash2 className="w-3.5 h-3.5" aria-hidden="true" />

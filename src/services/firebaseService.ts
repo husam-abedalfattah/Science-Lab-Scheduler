@@ -7,7 +7,10 @@ import {
   getDocs,
   writeBatch,
   runTransaction,
-  deleteField
+  deleteField,
+  query,
+  orderBy,
+  limit
 } from 'firebase/firestore';
 import { db, authReady } from '../firebase';
 import {
@@ -16,16 +19,21 @@ import {
   Reservation,
   SectionData,
   SupervisorReview,
-  Material
+  Material,
+  AuditEntry,
+  StoredAdminAccount
 } from '../types';
 import { INITIAL_APP_STATE } from '../data/initialData';
-import { MAX_ARCHIVED_WEEKS } from '../constants';
+import { MAX_ARCHIVED_WEEKS, MAX_AUDIT_ENTRIES } from '../constants';
+import { planMaterialImport } from '../utils/materialImport';
 import { SCHOOL_LABEL } from '../brand';
 import { reservationKey } from '../utils/scheduleKeys';
 
 const SECTIONS_COLLECTION = 'sections';
 const RESERVATIONS_COLLECTION = 'reservations';
 const MATERIALS_COLLECTION = 'materials';
+const AUDITS_COLLECTION = 'audits';
+const ADMIN_ACCOUNTS_COLLECTION = 'adminAccounts';
 
 /**
  * Deterministic document id for a booking slot.
@@ -386,17 +394,28 @@ export async function deleteMaterial(materialId: string) {
 }
 
 export interface MaterialUpsertResult {
+  /** New stock lines added to the school. */
   created: number;
-  updated: number;
+  /** Existing lines whose quantity the sheet added to. */
+  merged: number;
 }
 
 /**
  * Bulk upsert for the spreadsheet import.
  *
- * Matching, in order: the item `code` when the row has one, otherwise
- * name + lab. That is the honest key -- a school numbers its chemicals but
- * rarely its beakers, and two beakers of the same name in the same lab are the
- * same stock line.
+ * The decision of what merges into what is `planMaterialImport` in
+ * utils/materialImport.ts -- pure, and covered by `npm run verify:import`.
+ * This function is only the writer: it turns the plan into documents.
+ *
+ * Two rules, both from the plan and both worth restating here because they are
+ * what an administrator is trusting when they press the button:
+ *
+ * - **Nothing is deleted or blanked.** Records the sheet does not mention are
+ *   left alone. An import adds to the stockroom; it never replaces it.
+ * - **A matching line has the sheet's quantity added to its own**, rather than
+ *   overwritten. A line matches only when the school, the lab and every other
+ *   field are identical -- so the same reagent on a different shelf stays a
+ *   separate record instead of quietly moving.
  *
  * Batched at 400 because Firestore caps a batch at 500 writes and the whole
  * batch fails rather than partially applying.
@@ -408,33 +427,20 @@ export async function upsertMaterials(
 ): Promise<MaterialUpsertResult> {
   await authReady;
 
-  const byCode = new Map<string, Material>();
-  const byNameLab = new Map<string, Material>();
-  existing
-    .filter((m) => m.section === section)
-    .forEach((m) => {
-      if (m.code) byCode.set(m.code.trim().toLowerCase(), m);
-      byNameLab.set(`${m.name.trim().toLowerCase()}::${m.labId}`, m);
-    });
-
+  const plan = planMaterialImport(section, rows, existing);
   const updatedAt = new Date().toISOString();
-  let created = 0;
-  let updated = 0;
-  const writes: { id: string; data: Record<string, unknown> }[] = [];
 
-  rows.forEach((row) => {
-    const match =
-      (row.code && byCode.get(row.code.trim().toLowerCase())) ||
-      byNameLab.get(`${row.name.trim().toLowerCase()}::${row.labId}`);
-
-    if (match) updated += 1;
-    else created += 1;
-
-    writes.push({
-      id: match?.id || doc(collection(db, MATERIALS_COLLECTION)).id,
-      data: pruneEmpty({ ...row, section, updatedAt })
-    });
-  });
+  const writes = plan.entries.map((entry) => ({
+    id: entry.existing?.id || doc(collection(db, MATERIALS_COLLECTION)).id,
+    data: pruneEmpty({
+      ...entry.row,
+      // Explicit rather than carried by the spread: the summed quantity is the
+      // whole point, and `entry.row` still holds the sheet's raw value.
+      quantity: entry.quantity,
+      section,
+      updatedAt
+    })
+  }));
 
   for (let i = 0; i < writes.length; i += 400) {
     const batch = writeBatch(db);
@@ -444,7 +450,147 @@ export async function upsertMaterials(
     await batch.commit();
   }
 
-  return { created, updated };
+  return { created: plan.created, merged: plan.merged };
+}
+
+/* --- Administrator accounts -------------------------------------------- */
+
+/**
+ * Live view of the administrator accounts.
+ *
+ * Every signed-in client subscribes, because the password check happens in the
+ * browser -- there is no server to do it. That is why what is stored is a slow
+ * salted hash and never the password; see src/utils/adminAuth.ts.
+ */
+export function subscribeToAdminAccounts(
+  onChange: (accounts: StoredAdminAccount[]) => void,
+  onError?: (err: unknown) => void
+) {
+  let unsubscribe: (() => void) | null = null;
+  let cancelled = false;
+
+  authReady.then(() => {
+    if (cancelled) return;
+    unsubscribe = onSnapshot(
+      collection(db, ADMIN_ACCOUNTS_COLLECTION),
+      (snap) => {
+        onChange(
+          snap.docs
+            .map((d) => ({ ...(d.data() as StoredAdminAccount), id: d.id }))
+            // Stable order, so "the first match wins" is the same answer on
+            // every client rather than whatever Firestore returned today.
+            .sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''))
+        );
+      },
+      (err) => {
+        console.error('Firestore admin accounts snapshot error:', err);
+        onError?.(err);
+      }
+    );
+  });
+
+  return () => {
+    cancelled = true;
+    unsubscribe?.();
+  };
+}
+
+/**
+ * Creates or updates an administrator account.
+ *
+ * Takes the already-hashed material rather than a password: hashing is the
+ * caller's job, so a plaintext password never reaches this module and cannot
+ * be logged, retried or accidentally written by a later edit here.
+ */
+export async function saveAdminAccount(
+  account: Omit<StoredAdminAccount, 'id'> & { id?: string }
+): Promise<string> {
+  await authReady;
+  const id = account.id || doc(collection(db, ADMIN_ACCOUNTS_COLLECTION)).id;
+  const { id: _ignored, section, ...rest } = account;
+
+  await setDoc(
+    doc(db, ADMIN_ACCOUNTS_COLLECTION, id),
+    {
+      ...pruneEmpty(rest),
+      // `section` is the one field here that can be cleared, and a merge write
+      // that simply omits a key leaves the old value in place -- so moving
+      // someone from one school back to "Both schools" silently did nothing.
+      // deleteField() actually removes it.
+      section: section ?? deleteField()
+    },
+    { merge: true }
+  );
+  return id;
+}
+
+export async function deleteAdminAccount(accountId: string) {
+  await authReady;
+  await deleteDoc(doc(db, ADMIN_ACCOUNTS_COLLECTION, accountId));
+}
+
+/* --- Modification history ---------------------------------------------- */
+
+/**
+ * Appends one line to the modification history.
+ *
+ * Deliberately never throws. The log exists to say what happened to the
+ * stockroom, and a stockroom edit that genuinely succeeded must not be
+ * reported to the user as a failure because the bookkeeping write behind it
+ * did not land. A dropped entry is a gap in the record; a false error message
+ * is a technician re-doing a delete that already worked.
+ *
+ * Append-only is enforced in firestore.rules, not here: `audits` allows create
+ * and denies update and delete, so an entry cannot be edited away by the
+ * person it names.
+ */
+export async function recordAudit(entry: Omit<AuditEntry, 'id'>): Promise<void> {
+  try {
+    await authReady;
+    const ref = doc(collection(db, AUDITS_COLLECTION));
+    await setDoc(ref, pruneEmpty({ ...entry, id: ref.id }));
+  } catch (err) {
+    console.error('Audit write failed (the change itself was not affected):', err);
+  }
+}
+
+/**
+ * Live view of the modification history, newest first.
+ *
+ * Capped at MAX_AUDIT_ENTRIES on the query rather than in the component: the
+ * collection grows for the life of the school and downloading all of it to
+ * render the last twenty rows would get slower every term. Older entries stay
+ * in Firestore -- an audit trail that drops its own evidence is not one.
+ */
+export function subscribeToAudits(
+  onChange: (entries: AuditEntry[]) => void,
+  onError?: (err: unknown) => void
+) {
+  let unsubscribe: (() => void) | null = null;
+  let cancelled = false;
+
+  authReady.then(() => {
+    if (cancelled) return;
+    unsubscribe = onSnapshot(
+      query(
+        collection(db, AUDITS_COLLECTION),
+        orderBy('at', 'desc'),
+        limit(MAX_AUDIT_ENTRIES)
+      ),
+      (snap) => {
+        onChange(snap.docs.map((d) => ({ ...(d.data() as AuditEntry), id: d.id })));
+      },
+      (err) => {
+        console.error('Firestore audits snapshot error:', err);
+        onError?.(err);
+      }
+    );
+  });
+
+  return () => {
+    cancelled = true;
+    unsubscribe?.();
+  };
 }
 
 /**
