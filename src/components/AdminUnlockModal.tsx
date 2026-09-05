@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Lock, Eye, EyeOff, X, ShieldCheck } from 'lucide-react';
+import { Lock, Eye, EyeOff, X } from 'lucide-react';
 import { AdminAccount } from '../types';
 import { useModalA11y } from '../hooks/useModalA11y';
 
@@ -156,7 +156,7 @@ export const AdminUnlockModal: React.FC<AdminUnlockModalProps> = ({
               autoFocus
               autoComplete="current-password"
               aria-invalid={error ? true : undefined}
-              aria-describedby={error ? 'admin-unlock-error' : 'admin-unlock-hint'}
+              aria-describedby={error ? 'admin-unlock-error' : undefined}
               className={`w-full bg-white border rounded-lg pl-3 pr-10 py-2 text-sm text-slate-900 text-center placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-brand-kingdom-500 transition ${
                 error ? 'border-brand-coral-600' : 'border-slate-300'
               }`}
@@ -172,24 +172,13 @@ export const AdminUnlockModal: React.FC<AdminUnlockModalProps> = ({
             </button>
           </div>
 
-          {error ? (
+          {error && (
             <p
               id="admin-unlock-error"
               role="alert"
               className="text-sm font-semibold text-brand-coral-800"
             >
               {error}
-            </p>
-          ) : (
-            <p
-              id="admin-unlock-hint"
-              className="text-xs text-slate-600 flex items-start gap-1.5 text-left"
-            >
-              <ShieldCheck className="w-3.5 h-3.5 mt-0.5 shrink-0" aria-hidden="true" />
-              <span>
-                Use your own password, not a shared one — this change is recorded against
-                whoever it belongs to.
-              </span>
             </p>
           )}
 

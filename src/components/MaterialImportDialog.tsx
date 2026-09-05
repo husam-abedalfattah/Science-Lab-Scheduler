@@ -380,10 +380,6 @@ export const MaterialImportDialog: React.FC<MaterialImportDialogProps> = ({
             </div>
             <div>
               <h3 className="text-base font-bold text-slate-900">Administrator only</h3>
-              <p className="text-sm text-slate-600 mt-1">
-                An import rewrites the whole stock list in one press, so it needs the admin
-                password. Browsing and editing single items does not.
-              </p>
             </div>
 
             <div className="text-left relative">
@@ -854,10 +850,7 @@ export const MaterialImportDialog: React.FC<MaterialImportDialogProps> = ({
               {result.merged === 1 ? '' : 's'} had the sheet&rsquo;s quantities added on, for{' '}
               {section ? SCHOOL_LABEL[section] : 'this school'}.
             </p>
-            <p className="text-xs text-slate-600 max-w-md mx-auto">
-              Nothing was deleted or overwritten. The change is recorded in the modification
-              history against your name.
-            </p>
+
             <div className="flex justify-center gap-2 pt-2">
               <button
                 type="button"

@@ -75,6 +75,13 @@ import { ConfirmDialog, ConfirmRequest } from './components/ConfirmDialog';
 
 const LAST_SECTION_KEY = 'labScheduler.lastSection';
 
+/**
+ * Sub-line on the password prompt. Deliberately terse: the prompt's title
+ * already names the specific action, and administrators do not need the
+ * accountability model restated every time they unlock something.
+ */
+const ADMIN_GATE_MESSAGE = 'Enter your administrator password to continue.';
+
 export default function App() {
   const [appState, setAppState] = useState<AppState>(INITIAL_APP_STATE);
 
@@ -186,9 +193,13 @@ export default function App() {
   /**
    * The modification history: who changed what, newest first.
    *
-   * Read by everyone. Only administrators can change the stockroom, but a
-   * teacher who finds an item gone should be able to see when it went and who
-   * removed it without holding a password themselves.
+   * Administrator-only, like everything else that touches the stockroom. It
+   * names people and what they did, which is management information rather
+   * than something the whole staff room needs.
+   *
+   * Subscribed for every client regardless, because the gate is in the UI: the
+   * `audits` rules allow any signed-in read, since anonymous auth cannot tell
+   * an administrator from a teacher. Treat this as tidiness, not secrecy.
    */
   const [auditEntries, setAuditEntries] = useState<AuditEntry[]>([]);
   const [auditError, setAuditError] = useState<string | null>(null);
@@ -674,7 +685,7 @@ export default function App() {
 
     requireAdmin(
       target ? `Cancel ${target.teacher}'s booking` : 'Cancel this booking',
-      'Cancelling a booking needs an administrator password, and is recorded against you.',
+      ADMIN_GATE_MESSAGE,
       admin => {
         const doCancel = async () => {
           try {
@@ -972,7 +983,7 @@ export default function App() {
 
     requireAdmin(
       material.id ? `Save changes to ${material.name}` : `Add ${material.name || 'a material'}`,
-      'Changing the stockroom needs an administrator password, and is recorded against you.',
+      ADMIN_GATE_MESSAGE,
       admin => {
         void (async () => {
           try {
@@ -1003,8 +1014,7 @@ export default function App() {
   const handleDeleteMaterial = (material: Material) => {
     requireAdmin(
       `Delete ${material.name}`,
-      'Deleting from the stockroom needs an administrator password, and is recorded ' +
-        'against you.',
+      ADMIN_GATE_MESSAGE,
       admin => {
         setConfirmRequest({
           title: `Delete ${material.name}?`,
@@ -1085,8 +1095,7 @@ export default function App() {
   const handleExportTemplate = (section: Section | null) => {
     requireAdmin(
       'Download the Excel template',
-      'Exporting the stock sheet needs an administrator password, and is recorded ' +
-        'against you.',
+      ADMIN_GATE_MESSAGE,
       admin => {
         setIsExportingTemplate(true);
         void downloadMaterialTemplate(section, {
@@ -1441,14 +1450,19 @@ export default function App() {
           onSave={handleSaveMaterial}
           onDelete={handleDeleteMaterial}
           onOpenImport={openImport}
-          onOpenHistory={() => setIsAuditOpen(true)}
+          onOpenHistory={() =>
+            requireAdmin(
+              'Open the modification history',
+              ADMIN_GATE_MESSAGE,
+              () => setIsAuditOpen(true)
+            )
+          }
           onExportTemplate={() => handleExportTemplate(null)}
           isExporting={isExportingTemplate}
           onRequireAdmin={(intent, run) =>
             requireAdmin(
               intent,
-              'Changing the stockroom needs an administrator password, and is recorded ' +
-                'against you.',
+              ADMIN_GATE_MESSAGE,
               () => run()
             )
           }
@@ -1470,7 +1484,7 @@ export default function App() {
         />
 
         <AuditLogModal
-          isOpen={isAuditOpen}
+          isOpen={isAuditOpen && isAdminLoggedIn}
           section={null}
           entries={auditEntries}
           onClose={() => setIsAuditOpen(false)}
@@ -1685,14 +1699,19 @@ export default function App() {
         onSave={handleSaveMaterial}
         onDelete={handleDeleteMaterial}
         onOpenImport={openImport}
-        onOpenHistory={() => setIsAuditOpen(true)}
+        onOpenHistory={() =>
+          requireAdmin(
+            'Open the modification history',
+            ADMIN_GATE_MESSAGE,
+            () => setIsAuditOpen(true)
+          )
+        }
         onExportTemplate={() => handleExportTemplate(currentSection)}
         isExporting={isExportingTemplate}
         onRequireAdmin={(intent, run) =>
           requireAdmin(
             intent,
-            'Changing the stockroom needs an administrator password, and is recorded ' +
-              'against you.',
+            ADMIN_GATE_MESSAGE,
             () => run()
           )
         }
@@ -1713,8 +1732,10 @@ export default function App() {
         onImport={handleImportMaterials}
       />
 
+      {/* Derived rather than stored, so signing out of the admin panel closes
+          the history instead of leaving it open behind them. */}
       <AuditLogModal
-        isOpen={isAuditOpen}
+        isOpen={isAuditOpen && isAdminLoggedIn}
         section={currentSection}
         entries={auditEntries}
         onClose={() => setIsAuditOpen(false)}

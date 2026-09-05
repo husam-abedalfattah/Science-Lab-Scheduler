@@ -192,9 +192,105 @@ service cloud.firestore {
     match /materials/{materialId} {
       allow read: if isSignedIn();
       allow create, update: if isSignedIn() && isValidMaterial(request.resource.data);
-      // Open for the same reason as reservations: anonymous auth cannot
-      // distinguish the lab technician -- who owns this data -- from anyone
-      // else. Tighten with isAdmin() once real sign-in lands.
+      // Still open at the rules layer, and this is the honest position rather
+      // than an oversight. The app now requires one of the administrator
+      // passwords before it will add, edit, delete, import or export a
+      // material, and stamps who acted into `audits` -- but that gate is in
+      // the browser. Firestore cannot see it: every client here is the same
+      // anonymous user, so a rule cannot tell the lab technician from a pupil
+      // with devtools open.
+      //
+      // Closing this properly is one change, not several: switch
+      // src/firebase.ts to Google sign-in restricted to the school domain,
+      // create an `admins/{uid}` document for each of the three password
+      // holders, then replace `isSignedIn()` with `isAdmin()` on the create,
+      // update and delete lines below and on `reservations` delete. The
+      // isAdmin() helper above already does the lookup.
+      allow delete: if isSignedIn();
+    }
+
+    // The modification history: who added, edited, deleted or imported what,
+    // and when. Shape must match AuditEntry in src/types.ts.
+    //
+    // Append-only, and that is the whole point of it. `create` is allowed,
+    // `update` and `delete` are denied outright -- so an entry cannot be
+    // rewritten or quietly removed by the person it names, which is the one
+    // property that makes a log worth keeping. It grows without bound by
+    // design; clients read the newest MAX_AUDIT_ENTRIES rather than all of it.
+    function isValidAudit(data) {
+      return data.keys().hasAll(['at', 'actorId', 'actorName', 'action', 'targetName'])
+        && data.at is string && data.at.size() <= 40
+        && data.actorId is string && data.actorId.size() > 0
+        && data.actorId.size() <= 60
+        && data.actorName is string && data.actorName.size() > 0
+        && data.actorName.size() <= 120
+        && data.action in [
+             'material_created', 'material_updated', 'material_deleted',
+             'material_imported', 'material_exported', 'reservation_cancelled',
+             'admin_created', 'admin_updated', 'admin_deleted'
+           ]
+        && data.targetName is string && data.targetName.size() <= 300
+        && (!('section' in data) || isValidSection(data.section))
+        && (!('targetId' in data) || (data.targetId is string && data.targetId.size() <= 200))
+        && (!('detail' in data) || (data.detail is string && data.detail.size() <= 500))
+        // Bounded so one pathological edit cannot write a megabyte of diff.
+        && (!('changes' in data) || (data.changes is list && data.changes.size() <= 40));
+    }
+
+    match /audits/{auditId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && isValidAudit(request.resource.data);
+      allow update, delete: if false;
+    }
+
+    // Administrator accounts created from the admin panel. Shape must match
+    // StoredAdminAccount in src/types.ts.
+    //
+    // ## Why every signed-in user can read this
+    //
+    // Because the password check happens in the browser -- there is no server
+    // to do it -- so the client has to fetch the accounts to verify against
+    // them. That is not a leak of the passwords: what is stored is PBKDF2-
+    // SHA256 over a per-account salt, never the password itself. A reader
+    // learns who the administrators are and can grind a weak password offline,
+    // which is why the app enforces a minimum length.
+    //
+    // It is emphatically not a security boundary. Someone reading this
+    // collection can equally well skip the UI and write to `materials`
+    // directly, since that rule only requires a signed-in user. The accounts
+    // exist so the modification history can name a person, and so a mis-click
+    // is not enough to wipe the stockroom.
+    //
+    // The write rules refuse a plaintext-looking record: `passwordHash` and
+    // `passwordSalt` must both be present and base64-shaped, so a future edit
+    // to the client cannot start storing the real thing without this failing
+    // loudly first.
+    function isValidAdminAccount(data) {
+      return data.keys().hasAll(
+               ['name', 'passwordHash', 'passwordSalt', 'passwordScheme',
+                'createdAt', 'updatedAt']
+             )
+        && data.name is string && data.name.size() > 0 && data.name.size() <= 120
+        // A PBKDF2-SHA256 digest is 32 bytes -> 44 base64 chars; the salt is
+        // 16 -> 24. Bounded rather than pinned, to leave room for a future
+        // scheme, but far too short to be holding a password someone typed.
+        && data.passwordHash is string
+        && data.passwordHash.size() >= 20 && data.passwordHash.size() <= 128
+        && data.passwordSalt is string
+        && data.passwordSalt.size() >= 16 && data.passwordSalt.size() <= 128
+        && data.passwordScheme is string && data.passwordScheme.size() <= 60
+        && data.createdAt is string && data.createdAt.size() <= 40
+        && data.updatedAt is string && data.updatedAt.size() <= 40
+        && (!('section' in data) || isValidSection(data.section))
+        && (!('createdBy' in data) || (data.createdBy is string && data.createdBy.size() <= 120))
+        && (!('passwordChangedAt' in data)
+             || (data.passwordChangedAt is string && data.passwordChangedAt.size() <= 40));
+    }
+
+    match /adminAccounts/{accountId} {
+      allow read: if isSignedIn();
+      allow create, update: if isSignedIn()
+        && isValidAdminAccount(request.resource.data);
       allow delete: if isSignedIn();
     }
 

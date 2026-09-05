@@ -94,11 +94,13 @@ const orDash = (v: string) => (v && v.trim() !== '' ? v : '—');
 /**
  * The modification history.
  *
- * Readable by everyone, deliberately. Only administrators can change the
- * stockroom, but a teacher who finds the sodium hydroxide gone should be able
- * to see that it was deleted on Tuesday and by whom, without needing the
- * password themselves. A log only visible to the people it holds to account is
- * not doing much.
+ * Administrator-only. It names individuals and what they did, which is
+ * management information rather than something the whole staff room needs.
+ *
+ * The gate is the app's, not the database's: `firestore.rules` allows any
+ * signed-in client to read `audits`, because anonymous auth cannot tell an
+ * administrator from a teacher. So this hides the log from ordinary use; it
+ * does not make it secret.
  *
  * Newest first, and capped upstream at MAX_AUDIT_ENTRIES -- see
  * `subscribeToAudits`. Filtering is client-side over that window.
@@ -153,9 +155,7 @@ export const AuditLogModal: React.FC<AuditLogModalProps> = ({
                 Modification history
               </h2>
               <p className="text-sm text-slate-600 mt-0.5">
-                Every change to the stockroom and every cancelled booking
-                {section ? ` in ${SCHOOL_LABEL[section]}` : ', across both schools'}, newest
-                first.
+                {section ? SCHOOL_LABEL[section] : 'Both schools'} · newest first
               </p>
             </div>
           </div>
@@ -226,11 +226,9 @@ export const AuditLogModal: React.FC<AuditLogModalProps> = ({
               <p className="text-sm font-semibold text-slate-800">
                 {entries.length === 0 ? 'Nothing has been changed yet.' : 'No matching changes.'}
               </p>
-              <p className="text-xs mt-1">
-                {entries.length === 0
-                  ? 'Adds, edits, deletions, imports and cancelled bookings all appear here.'
-                  : 'Try a different search or clear the action filter.'}
-              </p>
+              {entries.length > 0 && (
+                <p className="text-xs mt-1">Try a different search or filter.</p>
+              )}
             </div>
           ) : (
             <ol className="space-y-2">
@@ -286,10 +284,6 @@ export const AuditLogModal: React.FC<AuditLogModalProps> = ({
           )}
         </div>
 
-        <p className="pt-3 mt-3 border-t border-slate-200 text-xs text-slate-600">
-          Entries cannot be edited or removed from inside the app. The name recorded against a
-          change is whoever&rsquo;s password unlocked it.
-        </p>
       </div>
     </div>
   );

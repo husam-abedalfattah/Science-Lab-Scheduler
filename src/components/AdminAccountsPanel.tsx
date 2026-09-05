@@ -6,8 +6,7 @@ import {
   ShieldCheck,
   Eye,
   EyeOff,
-  AlertTriangle,
-  Info
+  AlertTriangle
 } from 'lucide-react';
 import { AdminAccount, Section, StoredAdminAccount } from '../types';
 import { SCHOOL_LABEL } from '../brand';
@@ -141,12 +140,7 @@ export const AdminAccountsPanel: React.FC<AdminAccountsPanelProps> = ({
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap justify-between items-center gap-3">
-        <div>
-          <h3 className="text-base font-bold text-slate-900">Administrators</h3>
-          <p className="text-sm text-slate-600 mt-0.5">
-            Each person signs in with their own password, so the history can name them.
-          </p>
-        </div>
+        <h3 className="text-base font-bold text-slate-900">Administrators</h3>
         <button
           type="button"
           onClick={() =>
@@ -240,7 +234,7 @@ export const AdminAccountsPanel: React.FC<AdminAccountsPanelProps> = ({
 
       {accounts.length === 0 && !loadError && (
         <p className="text-sm text-slate-600 border border-dashed border-slate-300 rounded-xl py-6 text-center">
-          No administrators added yet — only the built-in accounts below can sign in.
+          No administrators added yet.
         </p>
       )}
 
@@ -377,13 +371,6 @@ export const AdminAccountsPanel: React.FC<AdminAccountsPanelProps> = ({
         </div>
       )}
 
-      <p className="text-xs text-slate-600 flex items-start gap-1.5">
-        <Info className="w-3.5 h-3.5 shrink-0 mt-px" aria-hidden="true" />
-        <span>
-          Passwords are stored as a salted hash and cannot be shown — a forgotten one is
-          replaced, not recovered. These gates work in the browser only; see README.md.
-        </span>
-      </p>
     </div>
   );
 };

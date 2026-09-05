@@ -357,17 +357,23 @@ export const MaterialsModal: React.FC<MaterialsModalProps> = ({
             ))}
           </select>
 
-          {/* Who changed what. No password: only administrators can alter the
-              stockroom, but a teacher who finds an item gone should be able to
-              see when it went and who removed it. */}
+          {/* Who changed what. Administrator-only: it names people and what
+              they did, which is management information. */}
           <button
             type="button"
             onClick={onOpenHistory}
-            title="See who added, edited or deleted items"
+            title={
+              adminUser
+                ? 'See who added, edited or deleted items'
+                : 'See who changed what — needs an admin password'
+            }
             className="inline-flex items-center gap-1.5 px-3 py-2 bg-white hover:bg-slate-100 text-slate-800 border border-slate-300 rounded-lg text-sm font-semibold transition"
           >
             <History className="w-4 h-4" aria-hidden="true" />
             <span className="hidden sm:inline">History</span>
+            {!adminUser && (
+              <Lock className="w-3 h-3 text-slate-500" aria-label="Administrator only" />
+            )}
           </button>
 
           {/* The blank sheet to fill in. Its headings are exactly the ones the
